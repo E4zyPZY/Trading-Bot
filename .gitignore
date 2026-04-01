@@ -1,0 +1,28 @@
+# Secrets
+.env
+*.env
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime artifacts
+quant_news_trader/logs/
+quant_news_trader/reports/
+
+# Trained model artifacts
+quant_news_trader/models/*.pkl
+quant_news_trader/models/**/*.pth
+
+# Bundled vendor binaries (keep out of git)
+quant_news_trader/moomoo_OpenD_9.4.5418_Windows/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

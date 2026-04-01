@@ -1,0 +1,1 @@
+{"feature_cols": ["Close", "High", "Low", "Open", "Volume", "Adj Close", "return", "ret_1d", "ret_5d", "rolling_vol_5", "rolling_vol_20", "daily_sentiment", "swing_low_20", "dist_to_swing_low_20", "volume_rel_20", "stop_run_20", "stop_run_hi_vol_20"], "last_trained_date": "2025-12-06"}

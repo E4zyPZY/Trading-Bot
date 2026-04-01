@@ -1,0 +1,127 @@
+﻿market:
+  ticker: "AAPL"
+  lookback_days: 180
+  interval: "5m"
+
+news:
+  query: "Apple Inc"
+  language: "en"
+  lookback_days: 30
+  max_articles: 100
+
+broker:
+  initial_cash: 1000000.0
+  commission_per_trade: 10.0
+  slippage_bp: 5
+  max_loss_fraction: 1.0
+  max_position_fraction: 0.2
+
+option_models:
+  maturity_days: 30
+  risk_free_rate: 0.03
+  min_confidence: 0.1
+  merton:
+    lambda_j: 0.5
+    mu_j: -0.1
+    delta_j: 0.2
+
+model:
+  type: "pca_rf"
+  test_size: 0.2
+  random_state: 42
+  pca_components: 8
+  long_threshold: 0.60
+  short_threshold: 0.60
+
+risk:
+  # Greeks-based hedging
+  enable_delta_hedge: false           # auto-hedge delta with stock
+  enable_var_limit: true              # enforce VaR limits
+  enable_gamma_monitoring: true       # alert on gamma exposure
+  enable_vega_monitoring: true        # alert on vega exposure
+  
+  # Position limits
+  max_var_loss_pct: 2.0               # max 1-day loss at 99% confidence
+  max_delta_notional_pct: 1.0         # max 100% capital exposure
+  max_gamma_per_pct_move: 0.1         # max gamma sensitivity
+  
+  # Jump risk handling
+  enable_jump_risk_hedge: true        # increase vega hedge on vol jumps
+  jump_intensity_threshold: 0.05      # trigger level for jump hedging
+
+update:
+  # Model update schedules
+  enabled: true
+  base_lookback_days: 180              # Base historical data window
+  
+  # Update frequencies (in days)
+  micro_update_days: 3                 # Small updates: retrain on recent data
+  macro_update_days: 7                 # Medium updates: full retrain + feature engineering
+  major_update_days: 30                # Large updates: architecture changes + hyperparameter tuning
+  epoch_update_days: 365               # Major updates: complete model overhaul
+  
+  # Update types
+  micro_update:
+    incremental: true                  # Use incremental learning
+    new_data_days: 30                  # Days of new data to incorporate
+    retain_old_weight: 0.8             # Weight for old model vs new data
+    
+  macro_update:
+    full_retrain: true                 # Full retrain from scratch
+    extended_lookback: 365             # Use longer historical window
+    feature_refresh: true              # Recalculate all features
+    
+  major_update:
+    hyperparameter_tuning: true        # Run hyperparameter optimization
+    architecture_search: false         # Consider architecture changes
+    cross_validation_folds: 5          # CV folds for validation
+    
+  epoch_update:
+    complete_overhaul: true            # Consider new model types
+    benchmark_competition: true        # Compare against other models
+    feature_engineering: true          # Major feature engineering updates
+  
+  # Monte Carlo VaR
+  mc_confidence_level: 0.99           # 99% VaR
+  mc_num_paths: 10000                 # simulation paths
+  mc_horizon_days: 1                  # 1-day VaR
+
+data:
+  # KDB+ optional integration for large datasets
+  use_kdb: false                      # disable by default; set true for production
+  kdb_host: "localhost"               # KDB+ server hostname
+  kdb_port: 5000                      # KDB+ server port
+  kdb_enable_compression: true        # compress data in KDB+
+  kdb_retention_days: 3650            # keep 10 years of data
+  
+  # Fallback storage
+  fallback_data_dir: "./data"         # CSV/parquet storage if KDB+ unavailable
+
+logging:
+  level: "INFO"
+
+# Extended config for live trading
+live:
+  interval_seconds: 60
+  display_timezone: "Asia/Shanghai"
+  use_moomoo: true
+  long_threshold: 0.60
+  short_threshold: 0.60
+  resume_state: true
+  auto_start_paper_trading: true
+  launch_dashboard: true
+
+moomoo:
+  host: "127.0.0.1"
+  port: 11111
+  market: "US"
+  security_firm: "FUTUSECURITIES"
+
+# Extended broker config
+broker:
+  initial_cash: 1000000.0
+  commission_per_trade: 10.0
+  slippage_bp: 5
+  max_loss_fraction: 1.0
+  max_position_fraction: 0.2
+
