@@ -144,8 +144,8 @@ DOCUMENTATION:
   RISK_SYSTEM_SUMMARY.md               (this file)
 
 TESTS:
-  test_risk_modules.py                 (all 4 modules tested)
-  test_final_integration.py            (system integration check)
+  tests/system/test_risk_modules.py                 (all 4 modules tested)
+  tests/integration/test_final_integration.py       (system integration check)
 
 EXISTING (Unchanged):
   ✓ src/main.py
@@ -336,7 +336,7 @@ A: Yes! Just enable VaR limit. Greeks is optional for advanced users.
 |------|---------|-----------|
 | `RISK_MANAGEMENT_GUIDE.md` | Deep dive, all features | 15 min |
 | `RISK_SYSTEM_SUMMARY.md` | Overview, use cases | 5 min |
-| `test_risk_modules.py` | Working examples | 10 min |
+| `tests/system/test_risk_modules.py` | Working examples | 10 min |
 | `src/models/greeks.py` | Greeks code + docstrings | 10 min |
 | `src/risk/risk_manager.py` | Risk manager code | 10 min |
 

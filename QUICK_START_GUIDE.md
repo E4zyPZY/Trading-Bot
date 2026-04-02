@@ -377,6 +377,9 @@ Qant/
 │   ├── reports/                   # Analysis reports (created during runs)
 │   ├── src/                       # Source code
 │   ├── tests/                     # Test files
+│   │   ├── unit/                  # Fast unit/smoke checks
+│   │   ├── integration/           # Cross-module integration checks
+│   │   └── system/                # End-to-end and subsystem validation
 │   ├── requirements.txt
 │   └── .env.example
 ├── scripts/                       # Automation scripts

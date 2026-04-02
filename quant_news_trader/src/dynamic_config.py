@@ -48,12 +48,18 @@ def load_dynamic_config(root: Path, base_profile: Optional[str] = None) -> Dict:
     if profile is None:
         cfg = base_cfg
     else:
-        profile_path = root / "configs" / f"config_{profile}.yaml"
-        if not profile_path.exists():
-            raise FileNotFoundError(f"Config file not found: {profile_path}")
-        with profile_path.open("r", encoding="utf-8") as f:
-            profile_cfg = yaml.safe_load(f) or {}
-        cfg = _deep_merge(base_cfg, profile_cfg)
+        # Preferred path: single-file profile overrides in config.yaml.
+        dynamic_profiles = base_cfg.get("dynamic_profiles", {}) or {}
+        if profile in dynamic_profiles:
+            cfg = _deep_merge(base_cfg, dynamic_profiles[profile] or {})
+        else:
+            # Backward compatibility: config_{profile}.yaml files.
+            profile_path = root / "configs" / f"config_{profile}.yaml"
+            if not profile_path.exists():
+                raise FileNotFoundError(f"Config file not found: {profile_path}")
+            with profile_path.open("r", encoding="utf-8") as f:
+                profile_cfg = yaml.safe_load(f) or {}
+            cfg = _deep_merge(base_cfg, profile_cfg)
 
     # Update tickers with selected stocks
     selected_tickers = get_selected_tickers(root)
@@ -62,6 +68,8 @@ def load_dynamic_config(root: Path, base_profile: Optional[str] = None) -> Dict:
     # Optionally set the ticker to the first one
     if selected_tickers:
         cfg["market"]["ticker"] = selected_tickers[0]
+
+    cfg["active_profile"] = profile
 
     return cfg
 

@@ -19,8 +19,10 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-# Add paths
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root for `src` imports when run directly from nested test folders.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 def test_shap_analyzer():
     """Test SHAP-based model explainability."""

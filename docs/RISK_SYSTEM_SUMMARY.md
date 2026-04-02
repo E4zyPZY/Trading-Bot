@@ -346,7 +346,7 @@ UPDATED:
 config.yaml                       # Risk parameters
 
 TEST FILES:
-test_risk_modules.py              # Full validation suite
+tests/system/test_risk_modules.py # Full validation suite
 
 DOCUMENTATION:
 RISK_MANAGEMENT_GUIDE.md          # Deep dive guide
@@ -380,7 +380,7 @@ RISK_MANAGEMENT_GUIDE.md          # Deep dive guide
 - **Greeks**: See `src/models/greeks.py` docstrings
 - **VaR**: See `src/risk/monte_carlo_var.py` docstrings
 - **Risk Manager**: See `src/risk/risk_manager.py` docstrings
-- **Examples**: Run `python test_risk_modules.py` for live code
+- **Examples**: Run `python tests/system/test_risk_modules.py` for live code
 
 ---
 

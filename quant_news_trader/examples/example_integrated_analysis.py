@@ -366,7 +366,7 @@ def main():
     logger.info("✓ ALL DEMONSTRATIONS COMPLETE")
     logger.info("█"*70)
     logger.info("\nNext Steps:")
-    logger.info("1. Run: python test_advanced_systems.py (validate modules)")
+    logger.info("1. Run: python tests/system/test_advanced_systems.py (validate modules)")
     logger.info("2. Read: PHASE3_ADVANCED_ANALYSIS.md (complete documentation)")
     logger.info("3. Integrate into: src/main.py and src/live_paper.py")
     logger.info("4. Backtest with regime-aware signal generation")

@@ -20,7 +20,10 @@ quant_news_trader/
 │   ├── models/       # ML models and backtesting
 │   ├── trading/      # Broker interfaces and execution
 │   └── utils/        # Utilities and logging
-├── tests/            # Unit tests and integration tests
+├── tests/            # Test suites
+│   ├── unit/         # Fast unit/smoke checks
+│   ├── integration/  # Cross-module integration checks
+│   └── system/       # End-to-end and subsystem validation
 ├── requirements.txt  # Python dependencies
 └── .env.example      # Environment variables template
 
@@ -73,5 +76,5 @@ python -m pytest tests/
 
 Or run individual test files:
 ```bash
-python tests/test_advanced_systems.py
+python tests/system/test_advanced_systems.py
 ```

@@ -55,7 +55,7 @@ python -m src.main --profile=balanced
 ### 4a. View Risk Module Status
 ```powershell
 cd quant_news_trader
-python test_risk_modules.py
+python tests/system/test_risk_modules.py
 ```
 **Output**: Validates all risk components (Greeks, VaR, Risk Manager, KDB+ fallback)
 
@@ -142,8 +142,8 @@ Strategy is working if:
 
 **Test All Modules:**
 ```powershell
-python test_risk_modules.py          # Validate Greeks, VaR, Risk Manager
-python test_final_integration.py     # Validate full system integration
+python tests/system/test_risk_modules.py               # Validate Greeks, VaR, Risk Manager
+python tests/integration/test_final_integration.py     # Validate full system integration
 ```
 
 **Documentation:**
@@ -194,8 +194,8 @@ python test_final_integration.py     # Validate full system integration
 ✅ `config.yaml` - Extended with risk parameters  
 
 **Testing & Documentation:**
-✅ `test_risk_modules.py` - Full test suite (4/4 passing)  
-✅ `test_final_integration.py` - System integration test (6/6 passing)  
+✅ `tests/system/test_risk_modules.py` - Full test suite (4/4 passing)  
+✅ `tests/integration/test_final_integration.py` - System integration test (6/6 passing)  
 ✅ `RISK_MANAGEMENT_GUIDE.md` - Comprehensive documentation  
 ✅ `RISK_SYSTEM_SUMMARY.md` - Overview & use cases  
 ✅ `IMPLEMENTATION_COMPLETE.md` - Project summary  

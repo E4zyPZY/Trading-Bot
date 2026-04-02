@@ -173,9 +173,9 @@ All edits pass syntax validation and runtime tests.
 
 Run tests to confirm everything works:
 ```bash
-python test_features.py      # Verify 28 factors compute
-python test_pca_model.py     # Verify PCA pipeline trains & predicts
-python test_config.py        # Verify config loads correctly
+python tests/unit/test_features.py      # Verify 28 factors compute
+python tests/unit/test_pca_model.py     # Verify PCA pipeline trains & predicts
+python tests/unit/test_config.py        # Verify config loads correctly
 ```
 
 All tests pass ✓

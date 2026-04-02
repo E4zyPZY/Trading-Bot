@@ -26,7 +26,7 @@ def load_universe(root: Path) -> List[str]:
     return data.get("tickers", [])
 
 
-def select_stocks(root: Path, max_stocks: int = 20) -> List[str]:
+def select_stocks(root: Path, max_stocks: int = 100) -> List[str]:
     """
     Select stocks to trade based on quant AI criteria.
 

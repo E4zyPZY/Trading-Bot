@@ -184,7 +184,9 @@ quant_news_trader/
 │   │   ├── model.py (existing, unchanged)
 │   │   └── ...
 │   └── ...
-├── test_advanced_systems.py ← Self-contained test suite
+├── tests/
+│   └── system/
+│       └── test_advanced_systems.py ← Self-contained test suite
 ├── example_integrated_analysis.py ← Complete workflow example
 ├── requirements.txt ← Updated with shap, scipy
 ├── PHASE3_ADVANCED_ANALYSIS.md ← Complete documentation
@@ -252,7 +254,7 @@ if is_allowed and abs(final_signal) > 0.5:
 ### 1. Validate all modules
 ```bash
 cd quant_news_trader
-python test_advanced_systems.py
+python tests/system/test_advanced_systems.py
 ```
 **Output:** 4/4 tests passing
 
@@ -388,7 +390,7 @@ Expected improvements:
 **Quick Links:**
 - Complete guide: `PHASE3_ADVANCED_ANALYSIS.md`
 - Working example: `example_integrated_analysis.py`
-- Test suite: `test_advanced_systems.py`
+- Test suite: `tests/system/test_advanced_systems.py`
 - SHAP module: `src/explainability/shap_analyzer.py`
 - Kalman-OU module: `src/models/kalman_ou.py`
 - Regime module: `src/analysis/regime_detection.py`

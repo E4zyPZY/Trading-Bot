@@ -14,7 +14,7 @@ broker:
   commission_per_trade: 10.0
   slippage_bp: 5
   max_loss_fraction: 1.0
-  max_position_fraction: 0.2
+  max_position_fraction: 0.5
 
 option_models:
   maturity_days: 30
@@ -105,11 +105,19 @@ live:
   interval_seconds: 60
   display_timezone: "Asia/Shanghai"
   use_moomoo: true
+  max_live_tickers: 100
+  news_refresh_minutes: 15
   long_threshold: 0.60
   short_threshold: 0.60
   resume_state: true
   auto_start_paper_trading: true
   launch_dashboard: true
+  
+  # Market hours handling
+  wait_for_market_open: true           # If true, wait for 9:30 AM ET before starting trading
+  skip_afterhours: false               # If true, skip trading during 4 PM - 8 PM ET and overnight
+  stale_bar_threshold_market_open: 180 # Stale bar warning threshold when market is open (seconds)
+  stale_bar_threshold_afterhours: 3600 # Stale bar warning threshold during after-hours (1 hour)
 
 moomoo:
   host: "127.0.0.1"
@@ -123,5 +131,34 @@ broker:
   commission_per_trade: 10.0
   slippage_bp: 5
   max_loss_fraction: 1.0
-  max_position_fraction: 0.2
+  max_position_fraction: 0.5
+
+# Single-file dynamic profile overrides selected daily by market outlook.
+dynamic_profiles:
+  aggro:
+    broker:
+      max_position_fraction: 0.9
+    live:
+      long_threshold: 0.56
+      short_threshold: 0.68
+      max_live_tickers: 100
+      news_refresh_minutes: 10
+
+  balanced:
+    broker:
+      max_position_fraction: 0.5
+    live:
+      long_threshold: 0.60
+      short_threshold: 0.72
+      max_live_tickers: 100
+      news_refresh_minutes: 15
+
+  conservative:
+    broker:
+      max_position_fraction: 0.3
+    live:
+      long_threshold: 0.65
+      short_threshold: 0.78
+      max_live_tickers: 100
+      news_refresh_minutes: 20
 

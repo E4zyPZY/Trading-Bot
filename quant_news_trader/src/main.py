@@ -3,6 +3,7 @@ import sys
 import tkinter as tk
 from threading import Thread
 import time
+import json
 
 import pandas as pd
 
@@ -22,6 +23,9 @@ from src.live_paper import main as run_live_paper
 from src.explainability.shap_analyzer import SHAPAnalyzer
 from src.analysis.regime_detection import HurstAnalyzer, RegimeDetector, adaptive_signal_by_regime
 from src.models.kalman_ou import KalmanFilter1D, KalmanOUFilter, PairsTrader
+
+
+LIVE_REFRESH_MS = 10000
 
 
 def _fallback_sentiment_summary(feat_df: pd.DataFrame) -> dict:
@@ -77,6 +81,15 @@ class BacktestDashboard:
         self.ticker = ticker
         self.key_variables = key_variables or {}
         self.live_log_path = live_log_path
+        self.active_profile = self.key_variables.get("active_profile", "auto")
+        self.selected_ticker_count = int(self.key_variables.get("selected_ticker_count", 0) or 0)
+        self.max_live_tickers = int(self.key_variables.get("max_live_tickers", 0) or 0)
+        self.max_position_fraction = float(self.key_variables.get("max_position_fraction", 0.0) or 0.0)
+        self.live_snapshot_path = (
+            live_log_path.parent / "portfolio_snapshot_live_nn.json"
+            if live_log_path is not None
+            else None
+        )
 
         self.root.title(f"Backtest Dashboard - {ticker}")
         self.root.geometry("900x700")  # Increased size for new content
@@ -124,6 +137,10 @@ class BacktestDashboard:
         max_dd_str = f"{stats.get('max_drawdown', 0) * 100:.2f}%"
 
         metrics_text = (
+            f"Active Profile:      {self.active_profile}\n"
+            f"Selected Tickers:    {self.selected_ticker_count}\n"
+            f"Max Live Tickers:    {self.max_live_tickers}\n"
+            f"Max Position Frac:   {self.max_position_fraction:.2f}\n"
             f"Final Equity:        ${final_equity:,.2f}\n"
             f"Buy & Hold Value:    ${buy_hold:,.2f}\n"
             f"Total Return:        {total_return_str}\n"
@@ -135,7 +152,7 @@ class BacktestDashboard:
             f"Total Trades:        {len(broker.trade_log)}"
         )
 
-        stats_label = tk.Label(
+        self.stats_label = tk.Label(
             stats_frame,
             text=metrics_text,
             justify="left",
@@ -144,7 +161,7 @@ class BacktestDashboard:
             padx=10,
             pady=10,
         )
-        stats_label.pack(fill="both", expand=True)
+        self.stats_label.pack(fill="both", expand=True)
 
         # Advanced Analysis Section
         if self.key_variables:
@@ -271,6 +288,9 @@ class BacktestDashboard:
         else:
             self.trade_listbox.insert(tk.END, "(no trades executed)")
 
+        if self.live_log_path is not None:
+            self._refresh_live_dashboard()
+
         # Close button
         close_btn = tk.Button(
             self.root,
@@ -281,6 +301,96 @@ class BacktestDashboard:
             font=("Segoe UI", 10),
         )
         close_btn.pack(pady=10)
+
+    def _refresh_live_dashboard(self):
+        """Refresh live portfolio stats and recent trades from live log/snapshot files."""
+        try:
+            if self.live_log_path is None or not self.live_log_path.exists():
+                self.root.after(LIVE_REFRESH_MS, self._refresh_live_dashboard)
+                return
+
+            live_df = pd.read_csv(self.live_log_path)
+            if live_df.empty or "portfolio_equity" not in live_df.columns:
+                self.root.after(LIVE_REFRESH_MS, self._refresh_live_dashboard)
+                return
+
+            live_df["execution_time"] = pd.to_datetime(
+                live_df.get("execution_time"),
+                utc=True,
+                errors="coerce",
+            )
+            live_df = live_df.sort_values("execution_time")
+
+            pe = pd.to_numeric(live_df["portfolio_equity"], errors="coerce").dropna()
+            if pe.empty:
+                self.root.after(LIVE_REFRESH_MS, self._refresh_live_dashboard)
+                return
+
+            start_eq = float(pe.iloc[0])
+            latest_eq = float(pe.iloc[-1])
+            total_return = (latest_eq / start_eq - 1.0) if start_eq > 0 else 0.0
+
+            t_valid = live_df["execution_time"].dropna()
+            cagr = None
+            if len(t_valid) >= 2 and start_eq > 0 and latest_eq > 0:
+                elapsed_years = (t_valid.iloc[-1] - t_valid.iloc[0]).total_seconds() / (365.25 * 24 * 3600)
+                if elapsed_years > 0:
+                    cagr = (latest_eq / start_eq) ** (1.0 / elapsed_years) - 1.0
+
+            total_cash = None
+            total_position_value = None
+            if self.live_snapshot_path is not None and self.live_snapshot_path.exists():
+                try:
+                    snap = json.loads(self.live_snapshot_path.read_text(encoding="utf-8"))
+                    total_cash = float(snap.get("total_cash", 0.0))
+                    total_position_value = float(snap.get("total_position_value", 0.0))
+                except Exception:
+                    total_cash = None
+                    total_position_value = None
+
+            cagr_str = f"{cagr * 100:.2f}%" if cagr is not None else "N/A"
+            cash_str = f"${total_cash:,.2f}" if total_cash is not None else "N/A"
+            sec_str = f"${total_position_value:,.2f}" if total_position_value is not None else "N/A"
+
+            live_metrics_text = (
+                f"Active Profile:      {self.active_profile}\n"
+                f"Selected Tickers:    {self.selected_ticker_count}\n"
+                f"Max Live Tickers:    {self.max_live_tickers}\n"
+                f"Max Position Frac:   {self.max_position_fraction:.2f}\n"
+                f"Live Portfolio Value: ${latest_eq:,.2f}\n"
+                f"Live Cash:            {cash_str}\n"
+                f"Live Securities:      {sec_str}\n"
+                f"Total Return (Live):  {total_return * 100:.4f}%\n"
+                f"CAGR (Live):          {cagr_str}\n"
+                f"Last Update:          {pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                f"Rows in Live Log:     {len(live_df)}"
+            )
+            self.stats_label.config(text=live_metrics_text)
+
+            # Refresh recent trades panel from latest rows.
+            self.trade_listbox.delete(0, tk.END)
+            self.trade_listbox.insert(
+                tk.END,
+                f"{'Exec Time':<20} {'Bar Time':<20} {'Ticker':<8} {'Event':<15} {'Signal':<8} {'Price':<10}",
+            )
+            self.trade_listbox.insert(tk.END, "-" * 100)
+            for _, row in live_df.tail(20).iterrows():
+                exec_ts = str(row.get("execution_time_local", row.get("execution_time", "")))[:19]
+                bar_ts = str(row.get("datetime", ""))[:19]
+                ticker = str(row.get("ticker", ""))[:8]
+                event = str(row.get("event", ""))[:15]
+                signal = float(pd.to_numeric(row.get("signal", 0.0), errors="coerce") or 0.0)
+                price = float(pd.to_numeric(row.get("price", 0.0), errors="coerce") or 0.0)
+                self.trade_listbox.insert(
+                    tk.END,
+                    f"{exec_ts:<20} {bar_ts:<20} {ticker:<8} {event:<15} {signal:<+8.1f} {price:<10.2f}",
+                )
+
+        except Exception:
+            # Keep dashboard alive even if one refresh fails.
+            pass
+
+        self.root.after(LIVE_REFRESH_MS, self._refresh_live_dashboard)
 
 
 def main():
@@ -486,6 +596,10 @@ def main():
         "market_bar_age_days": market_bar_age_days,
         "VaR_95": risk_metrics["VaR_95"],
         "ES_95": risk_metrics["ES_95"],
+        "active_profile": cfg.get("active_profile", profile if profile else "auto"),
+        "selected_ticker_count": len(cfg.get("market", {}).get("tickers", []) or []),
+        "max_live_tickers": int(cfg.get("live", {}).get("max_live_tickers", 0) or 0),
+        "max_position_fraction": float(cfg.get("broker", {}).get("max_position_fraction", 0.0) or 0.0),
     }
 
     avg_hurst_str = (

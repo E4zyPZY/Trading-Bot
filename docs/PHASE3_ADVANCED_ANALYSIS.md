@@ -455,7 +455,7 @@ All modules tested and passing:
 
 Run tests:
 ```bash
-python test_advanced_systems.py
+python tests/system/test_advanced_systems.py
 ```
 
 ---

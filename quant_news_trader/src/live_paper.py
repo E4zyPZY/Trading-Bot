@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import json
 from zoneinfo import ZoneInfo
+import yaml
 
 import pandas as pd
 
@@ -14,6 +15,15 @@ from src.features.sentiment import add_sentiment
 from src.features.feature_builder import build_features
 from src.trading.broker import SimBroker
 from src.models.model import train_pca_direction_model, predict_proba_pca
+from src.analysis.regime_detection import HurstAnalyzer
+from src.utils.market_hours import (
+    is_us_market_open,
+    is_us_market_premarket,
+    is_us_market_afterhours,
+    minutes_until_market_open,
+    minutes_until_market_close,
+    get_us_market_status,
+)
 
 try:
     from src.trading.moomoo_broker import MoomooPaperBroker
@@ -79,6 +89,109 @@ def _compute_bar_age_seconds(ts) -> float | None:
     if pd.isna(dt):
         return None
     return float((pd.Timestamp.now("UTC") - dt).total_seconds())
+
+
+def _news_query_for_ticker(base_query: str, ticker: str, multi_ticker: bool) -> str:
+    """Use ticker-specific query in multi-ticker mode for better sentiment relevance."""
+    if multi_ticker:
+        return f"{ticker} stock"
+    q = str(base_query or "").strip()
+    return q if q else f"{ticker} stock"
+
+
+def _load_universe_yaml(root: Path) -> list[str]:
+    """Load optional broader universe from data/nasdaq_universe.yaml."""
+    yaml_path = root / "data" / "nasdaq_universe.yaml"
+    if not yaml_path.exists():
+        return []
+    try:
+        payload = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        tickers = payload.get("tickers", [])
+        return [str(t).strip().upper() for t in tickers if str(t).strip()]
+    except Exception:
+        return []
+
+
+def _merge_tickers(primary: list[str], secondary: list[str], cap: int) -> list[str]:
+    """Keep primary order, then append unique secondary symbols up to cap."""
+    out = []
+    seen = set()
+    for t in (primary + secondary):
+        t2 = str(t).strip().upper()
+        if not t2 or t2 in seen:
+            continue
+        seen.add(t2)
+        out.append(t2)
+        if cap > 0 and len(out) >= cap:
+            break
+    return out
+
+
+def _adaptive_thresholds_from_hurst(
+    prices: pd.Series,
+    base_long: float,
+    base_short: float,
+) -> tuple[float, float, float | None]:
+    """Adjust thresholds using Hurst trendiness to produce more actionable live signals."""
+    try:
+        px = pd.to_numeric(prices, errors="coerce").dropna().values
+        if len(px) < 80:
+            return base_long, base_short, None
+
+        analyzer = HurstAnalyzer(lookback=min(252, len(px) - 1))
+        h = float(analyzer.calculate(px))
+
+        long_t = base_long
+        short_t = base_short
+
+        # Trending regime: easier longs, harder shorts.
+        if h >= 0.60:
+            long_t = max(0.52, base_long - 0.05)
+            short_t = min(0.85, base_short + 0.08)
+        # Mean-reverting/choppy regime: allow both sides a bit more often.
+        elif h <= 0.45:
+            long_t = max(0.53, base_long - 0.03)
+            short_t = max(0.53, base_short - 0.03)
+
+        return long_t, short_t, h
+    except Exception:
+        return base_long, base_short, None
+
+
+def _refresh_news_if_due(
+    cfg: dict,
+    state_entry: dict,
+    ticker: str,
+    logger,
+    force: bool = False,
+) -> None:
+    """Refresh per-ticker news on interval so sentiment/alpha remains live."""
+    ncfg = cfg.get("news", {})
+    refresh_minutes = int(cfg.get("live", {}).get("news_refresh_minutes", 15))
+    now = pd.Timestamp.now("UTC")
+
+    last_refresh = state_entry.get("last_news_refresh")
+    due = (
+        force
+        or last_refresh is None
+        or (now - last_refresh).total_seconds() >= max(1, refresh_minutes) * 60
+    )
+    if not due:
+        return
+
+    try:
+        news_df = fetch_news_free(
+            query=state_entry["news_query"],
+            language=ncfg.get("language", "en"),
+            lookback_days=int(ncfg.get("lookback_days", 30)),
+            max_articles=int(ncfg.get("max_articles", 100)),
+        )
+        news_df = add_sentiment(news_df)
+        state_entry["news_df"] = news_df
+        state_entry["last_news_refresh"] = now
+        logger.info("Refreshed news for %s (%d articles)", ticker, len(news_df))
+    except Exception as e:
+        logger.warning("News refresh failed for %s: %s", ticker, e)
 
 
 def _restore_state_from_log(log_path: Path, state: dict, logger) -> None:
@@ -229,7 +342,7 @@ def _write_portfolio_snapshot(snapshot_path: Path, snapshot: dict, logger) -> No
     logger.debug("Updated portfolio snapshot: %s", snapshot_path)
 
 
-def train_initial_model_for_ticker(cfg, logger, ticker: str):
+def train_initial_model_for_ticker(cfg, logger, ticker: str, news_query: str):
     """
     One-off NN training for a single ticker before the live loop.
     """
@@ -247,7 +360,7 @@ def train_initial_model_for_ticker(cfg, logger, ticker: str):
 
     logger.info("Fetching news for initial window for %s...", ticker)
     news_df = fetch_news_free(
-        query=ncfg["query"],
+        query=news_query,
         language=ncfg["language"],
         lookback_days=ncfg["lookback_days"],
         max_articles=ncfg["max_articles"],
@@ -278,6 +391,106 @@ def train_initial_model_for_ticker(cfg, logger, ticker: str):
     logger.info("Feature columns for %s: %s", ticker, feature_cols)
 
     return model_pipeline, feature_cols, context, news_df
+
+
+def _get_stale_bar_threshold(live_cfg: dict) -> float:
+    """
+    Get stale bar warning threshold based on market hours.
+    
+    Returns threshold in seconds. Higher during after-hours.
+    """
+    threshold_market = float(live_cfg.get("stale_bar_threshold_market_open", 180))
+    threshold_afterhours = float(live_cfg.get("stale_bar_threshold_afterhours", 3600))
+    
+    if is_us_market_open():
+        return threshold_market
+    else:
+        return threshold_afterhours
+
+
+def _market_interval_to_seconds(interval: str) -> float:
+    mapping = {
+        "1d": 86400.0,
+        "1h": 3600.0,
+        "30m": 1800.0,
+        "15m": 900.0,
+        "5m": 300.0,
+    }
+    return float(mapping.get(str(interval), 60.0))
+
+
+def _get_adaptive_stale_threshold(live_cfg: dict, market_interval: str, price_source: str) -> float:
+    """Compute stale threshold using market session, bar interval, and source latency."""
+    if not is_us_market_open():
+        return float(live_cfg.get("stale_bar_threshold_afterhours", 3600))
+
+    configured = float(live_cfg.get("stale_bar_threshold_market_open", 180))
+    cadence = _market_interval_to_seconds(market_interval)
+    base = max(configured, cadence * 2.0)
+
+    # Yahoo free intraday data is commonly delayed; avoid false stale alerts.
+    if str(price_source) == "yahoo_bar":
+        yahoo_delay_allowance = float(live_cfg.get("yahoo_delay_allowance_seconds", 1800))
+        base = max(base, cadence + yahoo_delay_allowance)
+
+    return base
+
+
+def _check_market_hours_and_wait(logger, live_cfg: dict) -> None:
+    """
+    Check if market is open. If not, optionally wait for market open.
+    
+    Args:
+        logger: Logger instance
+        live_cfg: Live trading config dict with 'wait_for_market' flag
+    """
+    # Check if user wants to wait for market open
+    wait_for_market = _as_bool(live_cfg.get("wait_for_market_open", True), default=True)
+    
+    # Log market hours configuration
+    market_status = get_us_market_status()
+    logger.info(f"[MARKET HOURS CHECK] Current status: {market_status}")
+    logger.info(f"[MARKET HOURS CHECK] wait_for_market_open setting: {wait_for_market}")
+    
+    if not is_us_market_open():
+        logger.warning("⚠️  US Stock Market is CLOSED. Status: %s", market_status)
+        
+        if wait_for_market:
+            minutes = minutes_until_market_open()
+            if minutes > 0:
+                logger.warning(
+                    "⏳ Market is closed. Will wait for market to open in %.1f minutes (9:30 AM ET)...",
+                    minutes,
+                )
+                start_time = time.time()
+                check_count = 0
+                while not is_us_market_open():
+                    time.sleep(60)
+                    check_count += 1
+                    remaining = minutes_until_market_open()
+                    if remaining > 0:
+                        logger.info("⏳ [%d min checks] Still waiting... %.1f minutes until market open", 
+                                  check_count, remaining)
+                    else:
+                        break
+                
+                elapsed = time.time() - start_time
+                logger.warning("✅ Market is now OPEN! Starting live trading (waited %.0f seconds)", elapsed)
+            else:
+                logger.warning(
+                    "Market is closed and calculated time is non-positive. "
+                    "Proceeding anyway, but expect stale data."
+                )
+        else:
+            logger.warning(
+                "Market is closed. Proceeding with after-hours data. "
+                "Expect stale market bars and potentially no fills. "
+                "Set 'wait_for_market_open: true' in config to wait for market open."
+            )
+    else:
+        logger.info("US Stock Market is OPEN. Ready to start trading.")
+        minutes_to_close = minutes_until_market_close()
+        logger.info("Market will close in %.0f minutes", minutes_to_close)
 
 
 def main(profile: str | None = None):
@@ -318,17 +531,22 @@ def main(profile: str | None = None):
     # === 1) Load approved universe of tickers ===
     approved_path = root / "data" / "approved_universe.csv"
     tickers = []
+    max_live_tickers = int(live_cfg.get("max_live_tickers", 100))
 
     if approved_path.exists():
         try:
             approved_df = pd.read_csv(approved_path)
             if not approved_df.empty and "ticker" in approved_df.columns:
                 tickers = approved_df["ticker"].dropna().astype(str).tolist()
-                logger.info("Loaded approved universe: %s", tickers)
+                logger.info("Loaded approved universe (%d symbols)", len(tickers))
             else:
                 logger.info("approved_universe.csv is empty or missing 'ticker' column.")
         except Exception as e:
             logger.exception("Failed to read approved_universe.csv: %s", e)
+
+    # Supplement with broader YAML universe and cap total names.
+    yaml_universe = _load_universe_yaml(root)
+    tickers = _merge_tickers(tickers, yaml_universe, max_live_tickers)
 
     if not tickers:
         # Fallback to single ticker from config
@@ -338,7 +556,7 @@ def main(profile: str | None = None):
         logger.info("No approved universe; falling back to config ticker: %s", fallback_ticker)
 
     num_tickers = len(tickers)
-    logger.info("Live NN paper-trading will use tickers: %s", tickers)
+    logger.info("Live NN paper-trading universe size=%d (cap=%d)", num_tickers, max_live_tickers)
 
     # === 2) Split total capital across tickers (equal slices) ===
     bcfg = cfg["broker"]
@@ -384,13 +602,20 @@ def main(profile: str | None = None):
 
     for ticker in tickers:
         try:
-            model, feature_cols, context, news_df = train_initial_model_for_ticker(cfg, logger, ticker)
+            ncfg = cfg.get("news", {})
+            query = _news_query_for_ticker(
+                base_query=str(ncfg.get("query", "")),
+                ticker=ticker,
+                multi_ticker=(num_tickers > 1),
+            )
+            model, feature_cols, context, news_df = train_initial_model_for_ticker(cfg, logger, ticker, query)
 
             broker = SimBroker(
                 initial_cash=per_ticker_cash,
                 commission_per_trade=bcfg["commission_per_trade"],
                 slippage_bp=bcfg["slippage_bp"],
                 max_loss_fraction=bcfg.get("max_loss_fraction", 1.0),
+                max_position_fraction=bcfg.get("max_position_fraction", 0.2),
             )
 
             state[ticker] = {
@@ -398,6 +623,8 @@ def main(profile: str | None = None):
                 "feature_cols": feature_cols,
                 "context": context,
                 "news_df": news_df,
+                "news_query": query,
+                "last_news_refresh": pd.Timestamp.now("UTC"),
                 "broker": broker,
                 "last_price": None,
             }
@@ -429,12 +656,14 @@ def main(profile: str | None = None):
         try:
             logger.info("Pre-market analysis for %s...", ticker)
 
+            _refresh_news_if_due(cfg, st, ticker, logger, force=False)
+
             price_df = fetch_market_data(
                 ticker=ticker,
                 lookback_days=mcfg["lookback_days"],
                 interval=mcfg["interval"],
             )
-            price_source = "yahoo_bar"
+            price_source = str(price_df.attrs.get("price_source", "yahoo_bar"))
             if moomoo_quote_broker is not None:
                 try:
                     live_px = float(moomoo_quote_broker.get_last_price(ticker))
@@ -456,22 +685,30 @@ def main(profile: str | None = None):
             st["last_price"] = price
 
             bar_age_sec = _compute_bar_age_seconds(dt)
-            if bar_age_sec is not None and bar_age_sec > max(180.0, float(interval_sec) * 2.0):
+            stale_threshold = _get_adaptive_stale_threshold(live_cfg, str(mcfg.get("interval", "5m")), price_source)
+            if bar_age_sec is not None and bar_age_sec > stale_threshold:
                 logger.warning(
-                    "Stale market bar for %s: age=%.1fs source=%s interval=%ss",
+                    "Stale market bar for %s: age=%.1fs source=%s interval=%ss (threshold=%.0fs)",
                     ticker,
                     bar_age_sec,
                     price_source,
                     interval_sec,
+                    stale_threshold,
                 )
 
             x_row = latest[st["feature_cols"]]
             prob_down, prob_up = predict_proba_pca(st["model"], x_row)
 
-            if prob_up >= long_thresh:
+            local_long, local_short, h = _adaptive_thresholds_from_hurst(
+                feat_df["Adj Close"],
+                long_thresh,
+                short_thresh,
+            )
+
+            if prob_up >= local_long:
                 pre_signal = 1.0
                 rec = "LONG"
-            elif prob_down >= short_thresh:
+            elif prob_down >= local_short:
                 pre_signal = -1.0
                 rec = "SHORT"
             else:
@@ -488,6 +725,15 @@ def main(profile: str | None = None):
                 rec,
                 pre_signal,
             )
+            if h is not None:
+                logger.info(
+                    "PRE-MARKET %s | %s hurst=%.3f thresholds long=%.3f short=%.3f",
+                    dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, "strftime") else str(dt),
+                    ticker,
+                    h,
+                    local_long,
+                    local_short,
+                )
 
             broker = st["broker"]
             broker.step_to_target_fraction(dt, price, pre_signal)
@@ -547,6 +793,9 @@ def main(profile: str | None = None):
         interval_sec,
     )
 
+    # Check market hours and wait for market open if configured
+    _check_market_hours_and_wait(logger, live_cfg)
+
     # === 5) LIVE LOOP: iterate over all tickers each cycle ===
     while True:
         try:
@@ -555,12 +804,14 @@ def main(profile: str | None = None):
 
             for ticker, st in state.items():
                 try:
+                    _refresh_news_if_due(cfg, st, ticker, logger, force=False)
+
                     price_df = fetch_market_data(
                         ticker=ticker,
                         lookback_days=mcfg["lookback_days"],
                         interval=mcfg["interval"],
                     )
-                    price_source = "yahoo_bar"
+                    price_source = str(price_df.attrs.get("price_source", "yahoo_bar"))
                     if moomoo_quote_broker is not None:
                         try:
                             live_px = float(moomoo_quote_broker.get_last_price(ticker))
@@ -581,24 +832,44 @@ def main(profile: str | None = None):
                     st["last_price"] = price
 
                     bar_age_sec = _compute_bar_age_seconds(dt)
-                    if bar_age_sec is not None and bar_age_sec > max(180.0, float(interval_sec) * 2.0):
+                    stale_threshold = _get_adaptive_stale_threshold(live_cfg, str(mcfg.get("interval", "5m")), price_source)
+                    if bar_age_sec is not None and bar_age_sec > stale_threshold:
                         logger.warning(
-                            "Stale market bar for %s: age=%.1fs source=%s interval=%ss",
+                            "Stale market bar for %s: age=%.1fs source=%s interval=%ss (threshold=%.0fs)",
                             ticker,
                             bar_age_sec,
                             price_source,
                             interval_sec,
+                            stale_threshold,
                         )
 
                     x_row = latest[st["feature_cols"]]
                     prob_down, prob_up = predict_proba_pca(st["model"], x_row)
 
-                    if prob_up >= long_thresh:
+                    local_long, local_short, h = _adaptive_thresholds_from_hurst(
+                        feat_df["Adj Close"],
+                        long_thresh,
+                        short_thresh,
+                    )
+
+                    if prob_up >= local_long:
                         signal = 1.0
-                    elif prob_down >= short_thresh:
+                    elif prob_down >= local_short:
                         signal = -1.0
                     else:
                         signal = 0.0
+
+                    if h is not None:
+                        logger.info(
+                            "LIVE %s | hurst=%.3f thresholds long=%.3f short=%.3f prob_up=%.3f prob_down=%.3f signal=%+.1f",
+                            ticker,
+                            h,
+                            local_long,
+                            local_short,
+                            prob_up,
+                            prob_down,
+                            signal,
+                        )
 
                     broker = st["broker"]
                     broker.step_to_target_fraction(dt, price, signal)
