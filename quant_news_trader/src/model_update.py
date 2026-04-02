@@ -30,7 +30,7 @@ from sklearn.ensemble import RandomForestClassifier
 from src.config_loader import load_config
 from src.utils.logging_utils import setup_logging
 from src.data.market_data import fetch_market_data
-from src.data.news_data import fetch_news_free
+from src.data.news_data import fetch_news_for_watchlist
 from src.features.sentiment import add_sentiment
 from src.features.feature_builder import build_features
 from src.models.model import train_pca_direction_model, predict_proba_pca
@@ -120,11 +120,16 @@ class ModelUpdater:
 
         # Fetch news data
         self.logger.info("Fetching news data...")
-        news_df = fetch_news_free(
-            query=self.config["news"]["query"],
+        tickers = self.config.get("market", {}).get("tickers") or [self.market_cfg["ticker"]]
+        news_df = fetch_news_for_watchlist(
+            base_query=self.config["news"].get("query"),
+            tickers=tickers,
             language=self.config["news"]["language"],
             lookback_days=min(total_lookback, 90),  # News API limits
-            max_articles=self.config["news"]["max_articles"]
+            max_articles=self.config["news"]["max_articles"],
+            include_macro_news=bool(self.config["news"].get("include_macro_news", True)),
+            macro_queries=self.config["news"].get("macro_queries"),
+            per_query_article_cap=self.config["news"].get("per_query_article_cap"),
         )
 
         return price_df, news_df

@@ -4,10 +4,20 @@
   interval: "5m"
 
 news:
-  query: "Apple Inc"
+  query: ""
   language: "en"
   lookback_days: 30
   max_articles: 100
+  include_macro_news: true
+  per_query_article_cap: 30
+  macro_queries:
+    - "Federal Reserve"
+    - "US inflation CPI"
+    - "US nonfarm payrolls"
+    - "Treasury yields"
+    - "S&P 500 market"
+    - "NASDAQ market"
+    - "VIX volatility"
 
 broker:
   initial_cash: 1000000.0

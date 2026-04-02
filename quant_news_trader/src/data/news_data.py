@@ -1,8 +1,5 @@
-from datetime import datetime, timedelta
-from typing import Optional
-import os
+from typing import Optional, Iterable
 import logging
-from pathlib import Path
 from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
 
@@ -11,156 +8,16 @@ import pandas as pd
 
 
 logger = logging.getLogger(__name__)
-_ENV_LOADED = False
 
-
-def _load_local_env_vars() -> None:
-    """Load .env values into process env without external dependencies."""
-    global _ENV_LOADED
-    if _ENV_LOADED:
-        return
-
-    env_paths = [
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parents[2] / ".env",
-    ]
-
-    for env_path in env_paths:
-        if not env_path.exists():
-            continue
-
-        try:
-            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-        except Exception as e:
-            logger.warning("Failed loading .env from %s: %s", env_path, e)
-
-    _ENV_LOADED = True
-
-
-def _fetch_news_newsapi(
-    query: str,
-    api_key: str,
-    language: str = "en",
-    lookback_days: int = 7,
-    max_articles: int = 200,
-) -> pd.DataFrame:
-    """Fetch news from NewsAPI.org (requires API key)."""
-    end = pd.Timestamp.now("UTC")
-    start = end - pd.Timedelta(days=lookback_days)
-
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": query,
-        "language": language,
-        "from": start.isoformat(),
-        "to": end.isoformat(),
-        "sortBy": "publishedAt",
-        "pageSize": min(max_articles, 100),
-        "apiKey": api_key,
-    }
-
-    try:
-        resp = requests.get(url, params=params, timeout=20)
-        if not resp.ok:
-            logger.warning(
-                "NewsAPI request failed: status=%s query=%s response=%s",
-                resp.status_code,
-                query,
-                resp.text[:200],
-            )
-            return pd.DataFrame(columns=["published_at", "title", "description", "content"])
-
-        data = resp.json()
-        articles = data.get("articles", [])
-
-        rows = []
-        for a in articles:
-            rows.append(
-                {
-                    "published_at": a.get("publishedAt"),
-                    "title": a.get("title"),
-                    "description": a.get("description"),
-                    "content": a.get("content") or a.get("description"),
-                    "source": (a.get("source") or {}).get("name"),
-                    "url": a.get("url"),
-                }
-            )
-
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce", utc=True)
-            df = df.dropna(subset=["published_at"]).sort_values("published_at", ascending=False)
-        return df
-    except Exception as e:
-        logger.warning("NewsAPI fetch failed: %s", e)
-        return pd.DataFrame(columns=["published_at", "title", "description", "content"])
-
-
-def _fetch_news_gnews(
-    query: str,
-    api_key: str,
-    language: str = "en",
-    lookback_days: int = 7,
-    max_articles: int = 200,
-) -> pd.DataFrame:
-    """Fetch news from GNews (requires API key)."""
-    end = datetime.utcnow()
-    start = end - timedelta(days=lookback_days)
-
-    url = "https://gnews.io/api/v4/search"
-    params = {
-        "q": query,
-        "lang": language,
-        "from": start.isoformat(timespec="seconds") + "Z",
-        "to": end.isoformat(timespec="seconds") + "Z",
-        "max": max_articles,
-        "expand": "content",
-        "apikey": api_key,
-    }
-
-    try:
-        resp = requests.get(url, params=params, timeout=20)
-        if not resp.ok:
-            logger.warning(
-                "GNews request failed: status=%s query=%s response=%s",
-                resp.status_code,
-                query,
-                resp.text[:200],
-            )
-            return pd.DataFrame(columns=["published_at", "title", "description", "content"])
-
-        data = resp.json()
-        articles = data.get("articles", [])
-
-        rows = []
-        for a in articles:
-            rows.append(
-                {
-                    "published_at": a.get("publishedAt"),
-                    "title": a.get("title"),
-                    "description": a.get("description"),
-                    "content": a.get("content"),
-                    "source": a.get("source", {}).get("name"),
-                    "url": a.get("url"),
-                }
-            )
-
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce", utc=True)
-            df = df.dropna(subset=["published_at"]).sort_values("published_at", ascending=False)
-        return df
-    except Exception as e:
-        logger.warning("GNews fetch failed: %s", e)
-        return pd.DataFrame(columns=["published_at", "title", "description", "content"])
+_DEFAULT_MACRO_NEWS_QUERIES = [
+    "Federal Reserve",
+    "US inflation CPI",
+    "US nonfarm payrolls",
+    "Treasury yields",
+    "S&P 500 market",
+    "NASDAQ market",
+    "VIX volatility",
+]
 
 
 def _fetch_google_news_rss(
@@ -204,6 +61,7 @@ def _fetch_google_news_rss(
                     "content": description,
                     "source": source,
                     "url": link,
+                    "provider": "google_rss",
                 }
             )
 
@@ -226,44 +84,121 @@ def fetch_news_free(
     lookback_days: int = 7,
     max_articles: int = 200,
 ) -> pd.DataFrame:
-    """
-    Example free-ish news fetcher using GNews API (no AI, just headlines).
-    This is a placeholder; feel free to swap to any news endpoint you like.
-    """
-    _load_local_env_vars()
-
-    # Priority 1: NewsAPI (if key provided)
-    newsapi_key = os.getenv("NEWSAPI_KEY") or os.getenv("NEWS_API_KEY")
-    if newsapi_key:
-        df = _fetch_news_newsapi(
-            query=query,
-            api_key=newsapi_key,
-            language=language,
-            lookback_days=lookback_days,
-            max_articles=max_articles,
-        )
-        if not df.empty:
-            return df
-        logger.warning("NewsAPI returned no rows for query=%s; trying fallbacks.", query)
-
-    # Priority 2: GNews (if key provided)
-    gnews_key = os.getenv("GNEWS_API_KEY")
-    if gnews_key:
-        df = _fetch_news_gnews(
-            query=query,
-            api_key=gnews_key,
-            language=language,
-            lookback_days=lookback_days,
-            max_articles=max_articles,
-        )
-        if not df.empty:
-            return df
-        logger.warning("GNews returned no rows for query=%s; trying RSS fallback.", query)
-
-    # Priority 3: no-key Google News RSS
-    logger.info("Using Google News RSS fallback for query=%s", query)
+    """Fetch news from free RSS sources only."""
+    logger.info("Using Google News RSS for query=%s", query)
     return _fetch_google_news_rss(
         query=query,
         lookback_days=lookback_days,
         max_articles=max_articles,
     )
+
+
+def _normalize_ticker_query(ticker: str) -> str:
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return ""
+    return f"{t} stock"
+
+
+def _dedupe_ordered_strings(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        v = str(raw or "").strip()
+        if not v:
+            continue
+        key = v.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+    return out
+
+
+def build_news_query_list(
+    base_query: str | None = None,
+    tickers: Optional[list[str]] = None,
+    include_macro_news: bool = True,
+    macro_queries: Optional[list[str]] = None,
+) -> list[str]:
+    """Build an ordered query list: tickers first, then optional base and macro terms."""
+    ticker_queries = [_normalize_ticker_query(t) for t in (tickers or [])]
+    ticker_queries = [q for q in ticker_queries if q]
+
+    queries: list[str] = []
+    queries.extend(ticker_queries)
+
+    if base_query and str(base_query).strip():
+        queries.append(str(base_query).strip())
+
+    if include_macro_news:
+        queries.extend(macro_queries or _DEFAULT_MACRO_NEWS_QUERIES)
+
+    return _dedupe_ordered_strings(queries)
+
+
+def fetch_news_for_watchlist(
+    base_query: str | None = None,
+    tickers: Optional[list[str]] = None,
+    language: str = "en",
+    lookback_days: int = 7,
+    max_articles: int = 200,
+    include_macro_news: bool = True,
+    macro_queries: Optional[list[str]] = None,
+    per_query_article_cap: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Fetch and merge stock-specific + macro news into one DataFrame.
+
+    - Queries include each ticker as "{TICKER} stock"
+    - Optionally includes base_query and macro queries
+    - Deduplicates articles by URL then title/content fingerprints
+    """
+    queries = build_news_query_list(
+        base_query=base_query,
+        tickers=tickers,
+        include_macro_news=include_macro_news,
+        macro_queries=macro_queries,
+    )
+    if not queries:
+        return pd.DataFrame(columns=["published_at", "title", "description", "content"])
+
+    per_query_cap = int(per_query_article_cap or max(10, max_articles // max(1, len(queries))))
+    parts: list[pd.DataFrame] = []
+
+    for q in queries:
+        try:
+            df_q = fetch_news_free(
+                query=q,
+                language=language,
+                lookback_days=lookback_days,
+                max_articles=per_query_cap,
+            )
+            if df_q is None or df_q.empty:
+                continue
+
+            df_q = df_q.copy()
+            df_q["query"] = q
+            df_q["news_scope"] = "macro" if q in (macro_queries or _DEFAULT_MACRO_NEWS_QUERIES) else "ticker"
+            parts.append(df_q)
+        except Exception as e:
+            logger.warning("Aggregated news fetch failed for query=%s: %s", q, e)
+
+    if not parts:
+        return pd.DataFrame(columns=["published_at", "title", "description", "content"])
+
+    merged = pd.concat(parts, ignore_index=True)
+    if "published_at" in merged.columns:
+        merged["published_at"] = pd.to_datetime(merged["published_at"], errors="coerce", utc=True)
+
+    if "url" in merged.columns:
+        merged = merged.drop_duplicates(subset=["url"], keep="first")
+
+    dedupe_cols = [c for c in ["published_at", "title", "description", "content"] if c in merged.columns]
+    if dedupe_cols:
+        merged = merged.drop_duplicates(subset=dedupe_cols, keep="first")
+
+    if "published_at" in merged.columns:
+        merged = merged.dropna(subset=["published_at"]).sort_values("published_at", ascending=False)
+
+    return merged.head(max_articles).reset_index(drop=True)

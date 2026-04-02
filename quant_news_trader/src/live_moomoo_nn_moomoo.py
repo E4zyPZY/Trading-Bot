@@ -15,7 +15,7 @@ from src.config_loader import load_config
 from src.utils.logging_utils import setup_logging
 from src.features.feature_builder import build_features
 from src.data.market_data import fetch_market_data
-from src.data.news_data import fetch_news_free
+from src.data.news_data import fetch_news_for_watchlist
 from src.features.sentiment import add_sentiment
 from src.trading.moomoo_broker import MoomooPaperBroker
 from src.models.nn_model import (
@@ -179,11 +179,15 @@ def train_nn_for_ticker(
         interval=mcfg["interval"],
     )
 
-    news_df = fetch_news_free(
-        query=ncfg.get("query", ticker),
+    news_df = fetch_news_for_watchlist(
+        base_query=ncfg.get("query"),
+        tickers=[ticker],
         language=ncfg["language"],
         lookback_days=ncfg["lookback_days"],
         max_articles=ncfg["max_articles"],
+        include_macro_news=bool(ncfg.get("include_macro_news", True)),
+        macro_queries=ncfg.get("macro_queries"),
+        per_query_article_cap=ncfg.get("per_query_article_cap"),
     )
     news_df = add_sentiment(news_df)
 
@@ -291,11 +295,15 @@ def main():
             model, context = load_nn_model(root, ticker, logger)
             # fetch some news_df to use in feature builder
             ncfg = cfg["news"]
-            news_df = fetch_news_free(
-                query=ncfg.get("query", ticker),
+            news_df = fetch_news_for_watchlist(
+                base_query=ncfg.get("query"),
+                tickers=[ticker],
                 language=ncfg["language"],
                 lookback_days=ncfg["lookback_days"],
                 max_articles=ncfg["max_articles"],
+                include_macro_news=bool(ncfg.get("include_macro_news", True)),
+                macro_queries=ncfg.get("macro_queries"),
+                per_query_article_cap=ncfg.get("per_query_article_cap"),
             )
             news_df = add_sentiment(news_df)
             state[ticker] = {"model": model, "context": context, "news_df": news_df}
@@ -392,11 +400,15 @@ def main():
                         lookback_days=m_market["lookback_days"],
                         interval=m_market["interval"],
                     )
-                    news_df = fetch_news_free(
-                        query=n_news.get("query", ticker),
+                    news_df = fetch_news_for_watchlist(
+                        base_query=n_news.get("query"),
+                        tickers=[ticker],
                         language=n_news["language"],
                         lookback_days=n_news["lookback_days"],
                         max_articles=n_news["max_articles"],
+                        include_macro_news=bool(n_news.get("include_macro_news", True)),
+                        macro_queries=n_news.get("macro_queries"),
+                        per_query_article_cap=n_news.get("per_query_article_cap"),
                     )
                     news_df = add_sentiment(news_df)
                     feat_df = build_features(price_df, news_df)

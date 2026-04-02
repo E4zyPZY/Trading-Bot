@@ -1,56 +1,8 @@
 from datetime import datetime, timedelta
 from typing import Literal
-import os
 
 import yfinance as yf
 import pandas as pd
-import requests
-
-
-_NEWSAPI_PRICE_WARNING_EMITTED = False
-
-
-def _try_newsapi_price_source(
-    ticker: str,
-    lookback_days: int,
-    interval: Literal["1d", "1h", "30m", "15m", "5m"] = "1d",
-) -> pd.DataFrame | None:
-    """
-    Connect to NewsAPI first when key is provided.
-
-    NewsAPI does not expose OHLCV/quote endpoints, so this function always
-    returns None after a connectivity check, allowing fallback providers.
-    """
-    api_key = os.getenv("NEWSAPI_KEY") or os.getenv("NEWS_API_KEY")
-    if not api_key:
-        return None
-
-    # Connectivity check only; NewsAPI cannot provide market bars.
-    try:
-        resp = requests.get(
-            "https://newsapi.org/v2/everything",
-            params={
-                "q": ticker,
-                "language": "en",
-                "pageSize": 1,
-                "apiKey": api_key,
-            },
-            timeout=8,
-        )
-        # If the key is invalid, let fallback continue silently.
-        if resp.status_code >= 400:
-            return None
-    except Exception:
-        return None
-
-    global _NEWSAPI_PRICE_WARNING_EMITTED
-    if not _NEWSAPI_PRICE_WARNING_EMITTED:
-        _NEWSAPI_PRICE_WARNING_EMITTED = True
-        print(
-            "[market_data] NewsAPI connected, but it does not provide live OHLCV prices. "
-            "Falling back to Yahoo for market bars."
-        )
-    return None
 
 
 def fetch_market_data(
@@ -65,21 +17,6 @@ def fetch_market_data(
     For intraday intervals (<= 60d history), we clamp lookback_days
     to avoid Yahoo's range limitations.
     """
-    # Try NewsAPI first if requested by user policy; fallback to Yahoo bars.
-    provider = (os.getenv("MARKET_DATA_PROVIDER") or "").strip().lower()
-    if provider in ("newsapi", "news_api", ""):
-        try:
-            newsapi_df = _try_newsapi_price_source(
-                ticker=ticker,
-                lookback_days=lookback_days,
-                interval=interval,
-            )
-            if newsapi_df is not None and not newsapi_df.empty:
-                return newsapi_df
-        except Exception:
-            # Fall through to Yahoo for resilience.
-            pass
-
     end = datetime.utcnow()
 
     # Clamp lookback for intraday data

@@ -44,12 +44,7 @@ Each config controls:
 - Broker settings (initial capital, commissions, slippage)
 
 ### 4. Environment Variables (Optional)
-Most data APIs used are free (yfinance, gnews.io). If you hit rate limits, create a `.env` file:
-
-```
-# .env file in quant_news_trader/
-NEWSAPI_KEY=your_api_key_here
-```
+No API keys are required for the current news pipeline. News collection uses free Google News RSS.
 
 ---
 
@@ -116,7 +111,7 @@ quant_news_trader/
 │   ├── multi_backtest.py            # Batch backtesting
 │   ├── data/
 │   │   ├── market_data.py           # yfinance wrapper
-│   │   ├── news_data.py             # gnews.io wrapper
+│   │   ├── news_data.py             # Google News RSS wrapper
 │   │   └── free_quotes.py
 │   ├── features/
 │   │   ├── feature_builder.py       # Price + news features

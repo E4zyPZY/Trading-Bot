@@ -10,7 +10,7 @@ import pandas as pd
 from src.config_loader import load_config
 from src.utils.logging_utils import setup_logging
 from src.data.market_data import fetch_market_data
-from src.data.news_data import fetch_news_free
+from src.data.news_data import fetch_news_for_watchlist
 from src.features.sentiment import add_sentiment
 from src.features.feature_builder import build_features
 from src.models.backtest import compute_performance_stats, compute_risk_metrics
@@ -339,14 +339,25 @@ class BacktestDashboard:
 
             total_cash = None
             total_position_value = None
+            news_source_line = "N/A"
             if self.live_snapshot_path is not None and self.live_snapshot_path.exists():
                 try:
                     snap = json.loads(self.live_snapshot_path.read_text(encoding="utf-8"))
                     total_cash = float(snap.get("total_cash", 0.0))
                     total_position_value = float(snap.get("total_position_value", 0.0))
+                    news_sources = snap.get("news_sources", {}) or {}
+                    if news_sources:
+                        counts = {}
+                        for _, src in news_sources.items():
+                            src_key = str(src or "unknown")
+                            counts[src_key] = counts.get(src_key, 0) + 1
+                        news_source_line = ", ".join(
+                            f"{k}:{v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                        )
                 except Exception:
                     total_cash = None
                     total_position_value = None
+                    news_source_line = "N/A"
 
             cagr_str = f"{cagr * 100:.2f}%" if cagr is not None else "N/A"
             cash_str = f"${total_cash:,.2f}" if total_cash is not None else "N/A"
@@ -360,6 +371,7 @@ class BacktestDashboard:
                 f"Live Portfolio Value: ${latest_eq:,.2f}\n"
                 f"Live Cash:            {cash_str}\n"
                 f"Live Securities:      {sec_str}\n"
+                f"News Source (Live):   {news_source_line}\n"
                 f"Total Return (Live):  {total_return * 100:.4f}%\n"
                 f"CAGR (Live):          {cagr_str}\n"
                 f"Last Update:          {pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
@@ -371,19 +383,20 @@ class BacktestDashboard:
             self.trade_listbox.delete(0, tk.END)
             self.trade_listbox.insert(
                 tk.END,
-                f"{'Exec Time':<20} {'Bar Time':<20} {'Ticker':<8} {'Event':<15} {'Signal':<8} {'Price':<10}",
+                f"{'Exec Time':<20} {'Bar Time':<20} {'Ticker':<8} {'News':<10} {'Event':<15} {'Signal':<8} {'Price':<10}",
             )
-            self.trade_listbox.insert(tk.END, "-" * 100)
+            self.trade_listbox.insert(tk.END, "-" * 112)
             for _, row in live_df.tail(20).iterrows():
                 exec_ts = str(row.get("execution_time_local", row.get("execution_time", "")))[:19]
                 bar_ts = str(row.get("datetime", ""))[:19]
                 ticker = str(row.get("ticker", ""))[:8]
+                news_source = str(row.get("news_source", ""))[:10]
                 event = str(row.get("event", ""))[:15]
                 signal = float(pd.to_numeric(row.get("signal", 0.0), errors="coerce") or 0.0)
                 price = float(pd.to_numeric(row.get("price", 0.0), errors="coerce") or 0.0)
                 self.trade_listbox.insert(
                     tk.END,
-                    f"{exec_ts:<20} {bar_ts:<20} {ticker:<8} {event:<15} {signal:<+8.1f} {price:<10.2f}",
+                    f"{exec_ts:<20} {bar_ts:<20} {ticker:<8} {news_source:<10} {event:<15} {signal:<+8.1f} {price:<10.2f}",
                 )
 
         except Exception:
@@ -419,11 +432,16 @@ def main():
 
     logger.info("Loading news...")
     ncfg = cfg["news"]
-    news_df = fetch_news_free(
-        query=ncfg["query"],
+    selected_tickers = cfg.get("market", {}).get("tickers") or [mcfg["ticker"]]
+    news_df = fetch_news_for_watchlist(
+        base_query=ncfg.get("query"),
+        tickers=selected_tickers,
         language=ncfg["language"],
         lookback_days=ncfg["lookback_days"],
         max_articles=ncfg["max_articles"],
+        include_macro_news=bool(ncfg.get("include_macro_news", True)),
+        macro_queries=ncfg.get("macro_queries"),
+        per_query_article_cap=ncfg.get("per_query_article_cap"),
     )
     logger.info(f"Got {len(news_df)} news articles.")
 

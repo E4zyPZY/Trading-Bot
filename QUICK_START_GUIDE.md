@@ -94,26 +94,13 @@ risk:
   max_var_loss_pct: 2.0  # Maximum daily loss limit
 ```
 
-**Environment variables (recommended for better news coverage):**
-1. Create `quant_news_trader\.env` (same folder as `requirements.txt`)
-2. Add your NewsAPI key:
+**Environment variables:**
+No API keys are required for news collection.
 
-```env
-NEWSAPI_KEY=YOUR_NEWSAPI_KEY_HERE
-```
+**News source used by the app:**
+1. Google News RSS (free, no API key required)
 
-3. Optional: you can also add GNews key if you use it:
-
-```env
-GNEWS_API_KEY=YOUR_GNEWS_API_KEY_HERE
-```
-
-**News source priority used by the app:**
-1. NewsAPI (if `NEWSAPI_KEY` is present)
-2. GNews (if `GNEWS_API_KEY` is present)
-3. Google News RSS fallback (no API key required)
-
-This means the system still runs without any key, but adding `NEWSAPI_KEY` usually improves article count and relevance.
+You can leave `quant_news_trader\.env` empty unless you later add other unrelated local settings.
 
 ### Step 1.5: Test Initial Setup
 **Run a quick test:**

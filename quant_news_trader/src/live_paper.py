@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 import sys
 import json
+from collections import Counter
 from zoneinfo import ZoneInfo
 import yaml
 
@@ -10,7 +11,7 @@ import pandas as pd
 from src.config_loader import load_config
 from src.utils.logging_utils import setup_logging
 from src.data.market_data import fetch_market_data
-from src.data.news_data import fetch_news_free
+from src.data.news_data import fetch_news_for_watchlist
 from src.features.sentiment import add_sentiment
 from src.features.feature_builder import build_features
 from src.trading.broker import SimBroker
@@ -180,18 +181,52 @@ def _refresh_news_if_due(
         return
 
     try:
-        news_df = fetch_news_free(
-            query=state_entry["news_query"],
+        news_df = fetch_news_for_watchlist(
+            base_query=ncfg.get("query"),
+            tickers=[ticker],
             language=ncfg.get("language", "en"),
             lookback_days=int(ncfg.get("lookback_days", 30)),
             max_articles=int(ncfg.get("max_articles", 100)),
+            include_macro_news=bool(ncfg.get("include_macro_news", True)),
+            macro_queries=ncfg.get("macro_queries"),
+            per_query_article_cap=ncfg.get("per_query_article_cap"),
         )
         news_df = add_sentiment(news_df)
         state_entry["news_df"] = news_df
         state_entry["last_news_refresh"] = now
+        news_meta = _summarize_news_source(news_df)
+        state_entry["news_source"] = news_meta["news_source"]
+        state_entry["news_source_breakdown"] = news_meta["news_source_breakdown"]
         logger.info("Refreshed news for %s (%d articles)", ticker, len(news_df))
     except Exception as e:
         logger.warning("News refresh failed for %s: %s", ticker, e)
+
+
+def _summarize_news_source(news_df: pd.DataFrame) -> dict:
+    """Return dominant provider and compact provider-count breakdown."""
+    if news_df is None or news_df.empty:
+        return {
+            "news_source": "no_news",
+            "news_source_breakdown": "",
+        }
+
+    providers = []
+    if "provider" in news_df.columns:
+        providers = [str(v).strip() for v in news_df["provider"].dropna().tolist() if str(v).strip()]
+
+    if not providers:
+        return {
+            "news_source": "unknown",
+            "news_source_breakdown": "",
+        }
+
+    counts = Counter(providers)
+    dominant = counts.most_common(1)[0][0]
+    breakdown = ",".join(f"{k}:{v}" for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0])))
+    return {
+        "news_source": dominant,
+        "news_source_breakdown": breakdown,
+    }
 
 
 def _restore_state_from_log(log_path: Path, state: dict, logger) -> None:
@@ -293,6 +328,7 @@ def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone
     total_position_value = 0.0
     total_equity = 0.0
     positions = []
+    portfolio_news_sources: dict[str, str] = {}
 
     for ticker, st in state.items():
         broker = st["broker"]
@@ -312,6 +348,10 @@ def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone
         total_position_value += position_value
         total_equity += equity
 
+        news_source = str(st.get("news_source", "unknown"))
+        news_source_breakdown = str(st.get("news_source_breakdown", ""))
+        portfolio_news_sources[ticker] = news_source
+
         positions.append(
             {
                 "ticker": ticker,
@@ -321,6 +361,11 @@ def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone
                 "cash": cash,
                 "equity": equity,
                 "active": bool(broker.active),
+                "news_source": news_source,
+                "news_source_breakdown": news_source_breakdown,
+                "news_articles": int(len(st.get("news_df", pd.DataFrame()))),
+                "last_news_refresh": _to_local_time_str(st.get("last_news_refresh"), timezone_name)
+                if st.get("last_news_refresh") is not None else "",
             }
         )
 
@@ -332,6 +377,7 @@ def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone
         "total_position_value": total_position_value,
         "total_equity": total_equity,
         "tickers": len(state),
+        "news_sources": portfolio_news_sources,
         "positions": positions,
     }
 
@@ -342,7 +388,7 @@ def _write_portfolio_snapshot(snapshot_path: Path, snapshot: dict, logger) -> No
     logger.debug("Updated portfolio snapshot: %s", snapshot_path)
 
 
-def train_initial_model_for_ticker(cfg, logger, ticker: str, news_query: str):
+def train_initial_model_for_ticker(cfg, logger, ticker: str):
     """
     One-off NN training for a single ticker before the live loop.
     """
@@ -359,14 +405,19 @@ def train_initial_model_for_ticker(cfg, logger, ticker: str, news_query: str):
     logger.info("Got %d rows of price data for %s.", len(price_df), ticker)
 
     logger.info("Fetching news for initial window for %s...", ticker)
-    news_df = fetch_news_free(
-        query=news_query,
+    news_df = fetch_news_for_watchlist(
+        base_query=ncfg.get("query"),
+        tickers=[ticker],
         language=ncfg["language"],
         lookback_days=ncfg["lookback_days"],
         max_articles=ncfg["max_articles"],
+        include_macro_news=bool(ncfg.get("include_macro_news", True)),
+        macro_queries=ncfg.get("macro_queries"),
+        per_query_article_cap=ncfg.get("per_query_article_cap"),
     )
     logger.info("Got %d news articles for %s.", len(news_df), ticker)
     news_df = add_sentiment(news_df)
+    news_meta = _summarize_news_source(news_df)
 
     logger.info("Building features for training on %s...", ticker)
     feat_df = build_features(price_df, news_df)
@@ -390,7 +441,7 @@ def train_initial_model_for_ticker(cfg, logger, ticker: str, news_query: str):
     logger.info("Initial PCA+RF model classification report for %s: %s", ticker, report)
     logger.info("Feature columns for %s: %s", ticker, feature_cols)
 
-    return model_pipeline, feature_cols, context, news_df
+    return model_pipeline, feature_cols, context, news_df, news_meta
 
 
 def _get_stale_bar_threshold(live_cfg: dict) -> float:
@@ -602,13 +653,7 @@ def main(profile: str | None = None):
 
     for ticker in tickers:
         try:
-            ncfg = cfg.get("news", {})
-            query = _news_query_for_ticker(
-                base_query=str(ncfg.get("query", "")),
-                ticker=ticker,
-                multi_ticker=(num_tickers > 1),
-            )
-            model, feature_cols, context, news_df = train_initial_model_for_ticker(cfg, logger, ticker, query)
+            model, feature_cols, context, news_df, news_meta = train_initial_model_for_ticker(cfg, logger, ticker)
 
             broker = SimBroker(
                 initial_cash=per_ticker_cash,
@@ -623,7 +668,8 @@ def main(profile: str | None = None):
                 "feature_cols": feature_cols,
                 "context": context,
                 "news_df": news_df,
-                "news_query": query,
+                "news_source": news_meta["news_source"],
+                "news_source_breakdown": news_meta["news_source_breakdown"],
                 "last_news_refresh": pd.Timestamp.now("UTC"),
                 "broker": broker,
                 "last_price": None,
@@ -771,6 +817,8 @@ def main(profile: str | None = None):
                 "drawdown": drawdown,
                 "model_confidence": max(prob_up, prob_down),
                 "portfolio_equity": portfolio_equity,
+                "news_source": st.get("news_source", "unknown"),
+                "news_source_breakdown": st.get("news_source_breakdown", ""),
             }
             history_rows.append(row)
             premarket_rows.append(row)
@@ -901,6 +949,8 @@ def main(profile: str | None = None):
                         "drawdown": drawdown,
                         "model_confidence": max(prob_up, prob_down),
                         "portfolio_equity": None,  # to be set after all tickers processed
+                        "news_source": st.get("news_source", "unknown"),
+                        "news_source_breakdown": st.get("news_source_breakdown", ""),
                     }
                     cycle_rows.append(row)
 
