@@ -229,8 +229,15 @@ def _summarize_news_source(news_df: pd.DataFrame) -> dict:
     }
 
 
-def _restore_state_from_log(log_path: Path, state: dict, logger) -> None:
-    """Restore per-ticker broker cash/position/price from the latest logged rows."""
+def _restore_state_from_log(
+    log_path: Path,
+    state: dict,
+    logger,
+    expected_total_equity: float,
+    max_equity_deviation_fraction: float = 0.25,
+    min_restore_fraction: float = 0.5,
+) -> None:
+    """Restore per-ticker broker state safely, rejecting discontinuous restores."""
     if not log_path.exists():
         return
 
@@ -245,33 +252,77 @@ def _restore_state_from_log(log_path: Path, state: dict, logger) -> None:
             df = df.sort_values("_order_ts", kind="stable")
 
         restored = 0
+        proposals = {}
+        proposed_total_equity = 0.0
+
         for ticker, st in state.items():
             ticker_rows = df[df["ticker"].astype(str) == str(ticker)]
             if ticker_rows.empty:
                 continue
 
             last = ticker_rows.iloc[-1]
-            broker = st["broker"]
-
-            # Restore broker state from last known row.
-            if "cash" in last and pd.notna(last["cash"]):
-                broker.cash = float(last["cash"])
-            if "position" in last and pd.notna(last["position"]):
-                broker.position = int(float(last["position"]))
-            if "equity" in last and pd.notna(last["equity"]):
-                broker.max_equity = max(float(last["equity"]), broker.max_equity)
-
-            if "price" in last and pd.notna(last["price"]):
-                st["last_price"] = float(last["price"])
-
-            # Keep broker active unless explicitly marked as inactive in logs.
+            cash = float(last["cash"]) if ("cash" in last and pd.notna(last["cash"])) else float(st["broker"].cash)
+            position = int(float(last["position"])) if ("position" in last and pd.notna(last["position"])) else int(st["broker"].position)
+            eq = float(last["equity"]) if ("equity" in last and pd.notna(last["equity"])) else cash
+            price = float(last["price"]) if ("price" in last and pd.notna(last["price"])) else st.get("last_price")
             event = str(last.get("event", "")) if hasattr(last, "get") else str(last["event"])
-            broker.active = not event.startswith("max_loss_reached")
+            active = not event.startswith("max_loss_reached")
+
+            proposals[ticker] = {
+                "cash": cash,
+                "position": position,
+                "equity": eq,
+                "price": price,
+                "active": active,
+            }
+            proposed_total_equity += eq
 
             restored += 1
 
-        if restored:
-            logger.info("Restored live paper state for %d tickers from %s", restored, log_path)
+        if not restored:
+            return
+
+        restore_fraction = restored / max(1, len(state))
+        deviation = abs(proposed_total_equity - expected_total_equity) / max(1.0, expected_total_equity)
+
+        if restore_fraction < float(min_restore_fraction):
+            logger.warning(
+                "Skipping resume: only %d/%d tickers found in log (%.1f%% < %.1f%%).",
+                restored,
+                len(state),
+                restore_fraction * 100.0,
+                float(min_restore_fraction) * 100.0,
+            )
+            return
+
+        if deviation > float(max_equity_deviation_fraction):
+            logger.warning(
+                "Skipping resume: restored equity %.2f deviates from configured initial cash %.2f by %.1f%% (limit %.1f%%).",
+                proposed_total_equity,
+                expected_total_equity,
+                deviation * 100.0,
+                float(max_equity_deviation_fraction) * 100.0,
+            )
+            return
+
+        for ticker, st in state.items():
+            if ticker not in proposals:
+                continue
+            p = proposals[ticker]
+            broker = st["broker"]
+            broker.cash = p["cash"]
+            broker.position = p["position"]
+            broker.max_equity = max(float(p["equity"]), broker.max_equity)
+            st["last_price"] = p["price"]
+            broker.active = p["active"]
+
+        logger.info(
+            "Restored live paper state for %d tickers from %s (total_equity=%.2f, expected=%.2f)",
+            restored,
+            log_path,
+            proposed_total_equity,
+            expected_total_equity,
+        )
     except Exception as e:
         logger.warning("Could not restore live paper state from %s: %s", log_path, e)
 
@@ -487,6 +538,19 @@ def _get_adaptive_stale_threshold(live_cfg: dict, market_interval: str, price_so
     return base
 
 
+def _should_block_stale_bar(
+    live_cfg: dict,
+    market_interval: str,
+    price_source: str,
+    bar_age_sec: float | None,
+) -> tuple[bool, float]:
+    """Return whether trading should be blocked because the latest signal bar is stale."""
+    stale_threshold = _get_adaptive_stale_threshold(live_cfg, market_interval, price_source)
+    hard_block = _as_bool(live_cfg.get("hard_stale_bar_block", True), default=True)
+    is_stale = bar_age_sec is not None and bar_age_sec > stale_threshold
+    return hard_block and is_stale, stale_threshold
+
+
 def _check_market_hours_and_wait(logger, live_cfg: dict) -> None:
     """
     Check if market is open. If not, optionally wait for market open.
@@ -582,7 +646,7 @@ def main(profile: str | None = None):
     # === 1) Load approved universe of tickers ===
     approved_path = root / "data" / "approved_universe.csv"
     tickers = []
-    max_live_tickers = int(live_cfg.get("max_live_tickers", 100))
+    max_live_tickers = int(live_cfg.get("max_live_tickers", 30))
 
     if approved_path.exists():
         try:
@@ -684,7 +748,14 @@ def main(profile: str | None = None):
     # Optional resume across restarts: restore cash/positions from prior log.
     resume_state = _as_bool(live_cfg.get("resume_state", True), default=True)
     if resume_state:
-        _restore_state_from_log(log_path, state, logger)
+        _restore_state_from_log(
+            log_path,
+            state,
+            logger,
+            expected_total_equity=total_initial_cash,
+            max_equity_deviation_fraction=float(live_cfg.get("resume_equity_deviation_fraction", 0.25)),
+            min_restore_fraction=float(live_cfg.get("resume_min_restore_fraction", 0.5)),
+        )
 
     # === 4) Pre-market rebalance for each ticker ===
     if log_path.exists():
@@ -731,7 +802,12 @@ def main(profile: str | None = None):
             st["last_price"] = price
 
             bar_age_sec = _compute_bar_age_seconds(dt)
-            stale_threshold = _get_adaptive_stale_threshold(live_cfg, str(mcfg.get("interval", "5m")), price_source)
+            block_stale_bar, stale_threshold = _should_block_stale_bar(
+                live_cfg,
+                str(mcfg.get("interval", "5m")),
+                price_source,
+                bar_age_sec,
+            )
             if bar_age_sec is not None and bar_age_sec > stale_threshold:
                 logger.warning(
                     "Stale market bar for %s: age=%.1fs source=%s interval=%ss (threshold=%.0fs)",
@@ -741,6 +817,44 @@ def main(profile: str | None = None):
                     interval_sec,
                     stale_threshold,
                 )
+
+            if block_stale_bar:
+                broker = st["broker"]
+                equity = broker.equity(price)
+                drawdown = 0.0
+                if broker.max_equity > 0:
+                    drawdown = 1.0 - (equity / broker.max_equity)
+
+                logger.warning(
+                    "Blocking pre-market trade for %s because the latest bar is stale.",
+                    ticker,
+                )
+
+                row = {
+                    "execution_time": pd.Timestamp.now("UTC"),
+                    "execution_time_local": _to_local_time_str(pd.Timestamp.now("UTC"), display_timezone),
+                    "datetime": dt,
+                    "ticker": ticker,
+                    "price": price,
+                    "price_source": price_source,
+                    "prob_up": None,
+                    "prob_down": None,
+                    "signal": 0.0,
+                    "equity": equity,
+                    "cash": broker.cash,
+                    "position": broker.position,
+                    "event": "stale_bar_block",
+                    "shares_delta": 0,
+                    "trade_price": None,
+                    "drawdown": drawdown,
+                    "model_confidence": None,
+                    "portfolio_equity": None,
+                    "news_source": st.get("news_source", "unknown"),
+                    "news_source_breakdown": st.get("news_source_breakdown", ""),
+                }
+                history_rows.append(row)
+                premarket_rows.append(row)
+                continue
 
             x_row = latest[st["feature_cols"]]
             prob_down, prob_up = predict_proba_pca(st["model"], x_row)
@@ -791,13 +905,6 @@ def main(profile: str | None = None):
             if broker.max_equity > 0:
                 drawdown = 1.0 - (equity / broker.max_equity)
 
-            # portfolio equity = sum of all brokers' equity at their last prices
-            portfolio_equity = 0.0
-            for tk, st2 in state.items():
-                lp = st2["last_price"]
-                if lp is not None:
-                    portfolio_equity += st2["broker"].equity(lp)
-
             row = {
                 "execution_time": pd.Timestamp.now("UTC"),
                 "execution_time_local": _to_local_time_str(pd.Timestamp.now("UTC"), display_timezone),
@@ -816,7 +923,7 @@ def main(profile: str | None = None):
                 "trade_price": last_event["trade_price"] if last_event else None,
                 "drawdown": drawdown,
                 "model_confidence": max(prob_up, prob_down),
-                "portfolio_equity": portfolio_equity,
+                "portfolio_equity": None,
                 "news_source": st.get("news_source", "unknown"),
                 "news_source_breakdown": st.get("news_source_breakdown", ""),
             }
@@ -825,6 +932,16 @@ def main(profile: str | None = None):
 
         except Exception as e:
             logger.exception("Error in pre-market for %s: %s", ticker, e)
+
+    if premarket_rows:
+        portfolio_equity = 0.0
+        for tk, st2 in state.items():
+            lp = st2["last_price"]
+            if lp is not None:
+                portfolio_equity += st2["broker"].equity(lp)
+
+        for r in premarket_rows:
+            r["portfolio_equity"] = portfolio_equity
 
     if history_rows:
         pd.DataFrame(history_rows).to_csv(log_path, index=False)
@@ -880,7 +997,12 @@ def main(profile: str | None = None):
                     st["last_price"] = price
 
                     bar_age_sec = _compute_bar_age_seconds(dt)
-                    stale_threshold = _get_adaptive_stale_threshold(live_cfg, str(mcfg.get("interval", "5m")), price_source)
+                    block_stale_bar, stale_threshold = _should_block_stale_bar(
+                        live_cfg,
+                        str(mcfg.get("interval", "5m")),
+                        price_source,
+                        bar_age_sec,
+                    )
                     if bar_age_sec is not None and bar_age_sec > stale_threshold:
                         logger.warning(
                             "Stale market bar for %s: age=%.1fs source=%s interval=%ss (threshold=%.0fs)",
@@ -890,6 +1012,43 @@ def main(profile: str | None = None):
                             interval_sec,
                             stale_threshold,
                         )
+
+                    if block_stale_bar:
+                        broker = st["broker"]
+                        equity = broker.equity(price)
+                        drawdown = 0.0
+                        if broker.max_equity > 0:
+                            drawdown = 1.0 - (equity / broker.max_equity)
+
+                        logger.warning(
+                            "Blocking live trade for %s because the latest bar is stale.",
+                            ticker,
+                        )
+
+                        row = {
+                            "execution_time": pd.Timestamp.now("UTC"),
+                            "execution_time_local": _to_local_time_str(pd.Timestamp.now("UTC"), display_timezone),
+                            "datetime": dt,
+                            "ticker": ticker,
+                            "price": price,
+                            "price_source": price_source,
+                            "prob_up": None,
+                            "prob_down": None,
+                            "signal": 0.0,
+                            "equity": equity,
+                            "cash": broker.cash,
+                            "position": broker.position,
+                            "event": "stale_bar_block",
+                            "shares_delta": 0,
+                            "trade_price": None,
+                            "drawdown": drawdown,
+                            "model_confidence": None,
+                            "portfolio_equity": None,
+                            "news_source": st.get("news_source", "unknown"),
+                            "news_source_breakdown": st.get("news_source_breakdown", ""),
+                        }
+                        cycle_rows.append(row)
+                        continue
 
                     x_row = latest[st["feature_cols"]]
                     prob_down, prob_up = predict_proba_pca(st["model"], x_row)

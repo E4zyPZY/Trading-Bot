@@ -115,10 +115,11 @@ live:
   interval_seconds: 60
   display_timezone: "Asia/Shanghai"
   use_moomoo: true
-  max_live_tickers: 100
+  max_live_tickers: 30
   news_refresh_minutes: 15
   long_threshold: 0.60
   short_threshold: 0.60
+  hard_stale_bar_block: true
   resume_state: true
   auto_start_paper_trading: true
   launch_dashboard: true
@@ -151,7 +152,7 @@ dynamic_profiles:
     live:
       long_threshold: 0.56
       short_threshold: 0.68
-      max_live_tickers: 100
+      max_live_tickers: 30
       news_refresh_minutes: 10
 
   balanced:
@@ -160,7 +161,7 @@ dynamic_profiles:
     live:
       long_threshold: 0.60
       short_threshold: 0.72
-      max_live_tickers: 100
+      max_live_tickers: 30
       news_refresh_minutes: 15
 
   conservative:
@@ -169,6 +170,6 @@ dynamic_profiles:
     live:
       long_threshold: 0.65
       short_threshold: 0.78
-      max_live_tickers: 100
+      max_live_tickers: 30
       news_refresh_minutes: 20
 

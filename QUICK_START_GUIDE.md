@@ -82,6 +82,8 @@ live:
    resume_state: true  # Keep cash/positions continuity after restart
    display_timezone: "Asia/Shanghai"  # UTC+8 display time (SG/Shanghai)
    use_moomoo: true  # Prefer moomoo snapshot quotes for fresher live prices
+   max_live_tickers: 30  # Trade only the top 30 live names each day
+   hard_stale_bar_block: true  # Refuse to trade when the latest signal bar is too old
 
 moomoo:
    host: "127.0.0.1"
@@ -208,7 +210,7 @@ python src/live_paper.py
 - Restores cash/positions from prior log on restart when `live.resume_state: true`
 - Uses UTC+8 display timestamps by default via `live.display_timezone: "Asia/Shanghai"`
 - Uses moomoo snapshot quotes when `live.use_moomoo: true` (with Yahoo fallback)
-- Logs stale bar warnings if latest market bar timestamp is too old for the configured interval
+- Blocks trading on a ticker when the latest signal bar is older than the configured stale-bar threshold
 - Can run continuously or for specific periods
 
 **Reset continuity (start fresh at initial cash):**
