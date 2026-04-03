@@ -47,15 +47,37 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             ndf["published_at"] = pd.to_datetime(ndf["published_at"], errors="coerce", utc=True)
 
         ndf = ndf.dropna(subset=["published_at"])
-        ndf["date"] = pd.to_datetime(ndf["published_at"], utc=True).dt.tz_convert(None).dt.normalize()
+        # Convert news dates to UTC, then to naive for matching with price dates
+        ndf_ts = pd.to_datetime(ndf["published_at"], utc=True)
+        if ndf_ts.dt.tz is not None:
+            ndf_ts = ndf_ts.dt.tz_convert(None)
+        ndf["date"] = ndf_ts.dt.normalize()
+        
         daily_sent = (
             ndf.groupby("date")["sentiment"]
             .mean()
             .rename("daily_sentiment")
         )
 
-        price_dates = pd.Series(pd.to_datetime(df.index, utc=True).tz_convert(None).normalize(), index=df.index)
+        # Convert price dates to naive datetime for matching
+        if isinstance(df.index, pd.DatetimeIndex):
+            price_index = df.index.to_series().reset_index(drop=True)
+        else:
+            price_index = pd.to_datetime(df.index)
+        
+        # Ensure price_index is naive (no timezone)
+        if hasattr(price_index, 'dt'):
+            if price_index.dt.tz is not None:
+                price_index_naive = price_index.dt.tz_convert(None)
+            else:
+                price_index_naive = price_index
+        else:
+            price_index_naive = price_index
+        
+        price_dates = pd.to_datetime(price_index_naive).dt.normalize()
         df["daily_sentiment"] = price_dates.map(daily_sent)
+        # Propagate latest known daily sentiment across intraday bars until new news arrives.
+        df["daily_sentiment"] = df["daily_sentiment"].ffill()
     else:
         df["daily_sentiment"] = 0.0
 

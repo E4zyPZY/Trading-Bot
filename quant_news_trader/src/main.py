@@ -28,37 +28,108 @@ from src.models.kalman_ou import KalmanFilter1D, KalmanOUFilter, PairsTrader
 LIVE_REFRESH_MS = 10000
 
 
-def _fallback_sentiment_summary(feat_df: pd.DataFrame) -> dict:
-    """Summarize how model probabilities differ under negative vs positive sentiment."""
+def _compute_sentiment_analysis(feat_df: pd.DataFrame, news_df: pd.DataFrame | None = None) -> dict:
+    """
+    Compute sentiment impact analysis from raw features.
+    Works directly with sentiment columns (daily_sentiment, daily_sentiment_ema_5, etc).
+    Returns dict with sentiment feature interactions.
+    """
+    results = {}
+    
+    # Find sentiment columns
     sentiment_cols = [
         col for col in feat_df.columns
         if "sentiment" in col.lower() and pd.api.types.is_numeric_dtype(feat_df[col])
     ]
-    if not sentiment_cols or "prob_up" not in feat_df.columns:
+    
+    if not sentiment_cols:
         return {}
-
-    results = {}
-    for col in sentiment_cols:
-        series = feat_df[col].dropna()
-        if series.empty or float(series.abs().sum()) == 0.0:
+    
+    # Find volatility features to interact with sentiment
+    vol_cols = [
+        col for col in feat_df.columns
+        if any(x in col.lower() for x in ['vol', 'atr', 'rolling_vol'])
+        and pd.api.types.is_numeric_dtype(feat_df[col])
+    ]
+    
+    if not vol_cols:
+        vol_cols = []
+    
+    # For each sentiment feature, create interactions with vol and price direction
+    for sent_col in sentiment_cols:
+        sent_series = feat_df[sent_col].dropna()
+        if sent_series.empty or float(sent_series.abs().sum()) < 1e-9:
             continue
+        
+        # Split by sentiment polarity (avoid edge case of all same sign)
+        neg_mask = feat_df[sent_col] < 0
+        pos_mask = feat_df[sent_col] > 0
+        neutral_mask = feat_df[sent_col] == 0
+        
+        neg_count = int(neg_mask.sum())
+        pos_count = int(pos_mask.sum())
+        
+        # Compute average direction (prob_up) for each sentiment regime
+        if "prob_up" in feat_df.columns:
+            baseline_prob_up = float(feat_df["prob_up"].mean())
+            neg_prob_up = float(feat_df.loc[neg_mask, "prob_up"].mean()) if neg_count > 0 else baseline_prob_up
+            pos_prob_up = float(feat_df.loc[pos_mask, "prob_up"].mean()) if pos_count > 0 else baseline_prob_up
+            elasticity_up = (pos_prob_up - neg_prob_up) / abs(neg_prob_up) if abs(neg_prob_up) > 1e-9 else 0.0
+            
+            results[f"{sent_col}_prob_up"] = {
+                "negative_impact": neg_prob_up,
+                "positive_impact": pos_prob_up,
+                "elasticity": elasticity_up,
+                "negative_count": neg_count,
+                "positive_count": pos_count,
+            }
+        
+        # For each volatility feature, compute interaction
+        for vol_col in vol_cols[:3]:  # Limit to 3 vol features to avoid clutter
+            baseline_vol = float(feat_df[vol_col].mean())
+            vol_neg = float(feat_df.loc[neg_mask, vol_col].mean()) if neg_count > 0 else baseline_vol
+            vol_pos = float(feat_df.loc[pos_mask, vol_col].mean()) if pos_count > 0 else baseline_vol
+            
+            if vol_neg > 1e-9:
+                vol_elasticity = (vol_pos - vol_neg) / vol_neg
+            else:
+                vol_elasticity = 0.0
+            
+            results[f"{sent_col}_{vol_col}"] = {
+                "negative_impact": vol_neg,
+                "positive_impact": vol_pos,
+                "elasticity": vol_elasticity,
+            }
+    
+    if results:
+        return results
 
-        neg_mask = feat_df[col] < 0
-        pos_mask = feat_df[col] > 0
-        if int(neg_mask.sum()) == 0 or int(pos_mask.sum()) == 0:
-            continue
+    # If feature-level sentiment is unavailable (often due date overlap gaps),
+    # provide a news-level fallback so reporting is still informative.
+    if news_df is not None and not news_df.empty and "sentiment" in news_df.columns:
+        sent = pd.to_numeric(news_df["sentiment"], errors="coerce").dropna()
+        if not sent.empty:
+            pos = float((sent > 0).mean())
+            neg = float((sent < 0).mean())
+            neu = float((sent == 0).mean())
+            return {
+                "news_sentiment_summary": {
+                    "negative_impact": float(sent[sent < 0].mean()) if (sent < 0).any() else 0.0,
+                    "positive_impact": float(sent[sent > 0].mean()) if (sent > 0).any() else 0.0,
+                    "elasticity": float(sent.mean()),
+                    "article_count": int(sent.shape[0]),
+                    "positive_ratio": pos,
+                    "negative_ratio": neg,
+                    "neutral_ratio": neu,
+                }
+            }
 
-        neg_prob = float(feat_df.loc[neg_mask, "prob_up"].mean())
-        pos_prob = float(feat_df.loc[pos_mask, "prob_up"].mean())
-        elasticity = (pos_prob - neg_prob) / abs(neg_prob) if neg_prob != 0 else 0.0
+    return {}
 
-        results[f"{col}_prob_up"] = {
-            "negative_impact": neg_prob,
-            "positive_impact": pos_prob,
-            "elasticity": elasticity,
-        }
 
-    return results
+def _fallback_sentiment_summary(feat_df: pd.DataFrame, news_df: pd.DataFrame | None = None) -> dict:
+    """Legacy fallback that calls the new sentiment analysis function."""
+    return _compute_sentiment_analysis(feat_df, news_df=news_df)
 
 
 class BacktestDashboard:
@@ -340,6 +411,7 @@ class BacktestDashboard:
             total_cash = None
             total_position_value = None
             news_source_line = "N/A"
+            sentiment_line = "N/A"
             if self.live_snapshot_path is not None and self.live_snapshot_path.exists():
                 try:
                     snap = json.loads(self.live_snapshot_path.read_text(encoding="utf-8"))
@@ -354,10 +426,17 @@ class BacktestDashboard:
                         news_source_line = ", ".join(
                             f"{k}:{v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
                         )
+                    # Extract sentiment metrics
+                    sentiment_impact = snap.get("sentiment_impact", {})
+                    portfolio_avg_sent = sentiment_impact.get("portfolio_avg_sentiment", 0.0)
+                    active_ticker_count = sentiment_impact.get("active_ticker_count", 0)
+                    if active_ticker_count > 0:
+                        sentiment_line = f"{portfolio_avg_sent:+.4f} ({active_ticker_count} tickers)"
                 except Exception:
                     total_cash = None
                     total_position_value = None
                     news_source_line = "N/A"
+                    sentiment_line = "N/A"
 
             cagr_str = f"{cagr * 100:.2f}%" if cagr is not None else "N/A"
             cash_str = f"${total_cash:,.2f}" if total_cash is not None else "N/A"
@@ -371,6 +450,7 @@ class BacktestDashboard:
                 f"Live Portfolio Value: ${latest_eq:,.2f}\n"
                 f"Live Cash:            {cash_str}\n"
                 f"Live Securities:      {sec_str}\n"
+                f"Portfolio Sentiment:  {sentiment_line}\n"
                 f"News Source (Live):   {news_source_line}\n"
                 f"Total Return (Live):  {total_return * 100:.4f}%\n"
                 f"CAGR (Live):          {cagr_str}\n"
@@ -548,10 +628,13 @@ def main():
     shap_analyzer = SHAPAnalyzer(pca_pipeline["model"], shap_feature_names)
     shap_analyzer.fit(x_shap_df)
 
-    # Get sentiment impact analysis
-    sentiment_impact = shap_analyzer.analyze_sentiment_impact(x_shap_df, feat_df["signal"].values)
+    # Get sentiment impact analysis using direct method (more reliable than SHAP)
+    # SHAP analyzer sees PCA-transformed features (PC1, PC2, etc) so it can't find "sentiment" columns
+    sentiment_impact = _compute_sentiment_analysis(feat_df, news_df=news_df)
+    
+    # If direct method returns empty, try SHAP as fallback
     if not sentiment_impact:
-        sentiment_impact = _fallback_sentiment_summary(feat_df)
+        sentiment_impact = shap_analyzer.analyze_sentiment_impact(x_shap_df, feat_df["signal"].values)
 
     # 2. Hurst Exponent and Regime Detection
     # Use shorter lookback for limited data
@@ -642,8 +725,23 @@ def main():
     with open(output_file, 'w') as f:
         f.write("=== Key Variables Report ===\n\n")
         f.write(f"Sentiment Impact Analysis:\n")
-        for key, value in sentiment_impact.items():
-            f.write(f"  {key}: {value}\n")
+        if sentiment_impact:
+            for key, value in sentiment_impact.items():
+                if isinstance(value, dict):
+                    neg = value.get('negative_impact', 'N/A')
+                    pos = value.get('positive_impact', 'N/A')
+                    elast = value.get('elasticity', 'N/A')
+                    if isinstance(neg, float) and isinstance(pos, float) and isinstance(elast, float):
+                        f.write(f"  {key}:\n")
+                        f.write(f"    Negative Sentiment Impact: {neg:.6f}\n")
+                        f.write(f"    Positive Sentiment Impact: {pos:.6f}\n")
+                        f.write(f"    Elasticity: {elast:.6f}\n")
+                    else:
+                        f.write(f"  {key}: {value}\n")
+                else:
+                    f.write(f"  {key}: {value}\n")
+        else:
+            f.write("  (No sentiment analysis available)\n")
 
         f.write(f"\nCurrent Market Regime: {key_variables['current_regime']}\n")
         f.write(f"Average Hurst Exponent: {avg_hurst_str}\n")

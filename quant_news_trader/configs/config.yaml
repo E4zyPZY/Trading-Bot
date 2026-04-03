@@ -120,8 +120,10 @@ live:
   universe_candidate_cap: 2000
   signal_confirm_bars: 2
   news_refresh_minutes: 15
-  long_threshold: 0.70
-  short_threshold: 0.60
+  long_threshold: 0.62
+  short_threshold: 0.62
+  target_return_pct: 0.004
+  max_drawdown_pct: 0.008
   hard_stale_bar_block: true
   resume_state: true
   auto_start_paper_trading: true
@@ -154,32 +156,38 @@ dynamic_profiles:
     broker:
       max_position_fraction: 0.9
     live:
-      long_threshold: 0.70
-      short_threshold: 0.68
+      long_threshold: 0.60
+      short_threshold: 0.60
       max_live_tickers: 100
       universe_candidate_cap: 2000
       signal_confirm_bars: 2
       news_refresh_minutes: 10
+      target_return_pct: 0.004
+      max_drawdown_pct: 0.010
 
   balanced:
     broker:
       max_position_fraction: 0.5
     live:
-      long_threshold: 0.70
-      short_threshold: 0.72
+      long_threshold: 0.62
+      short_threshold: 0.62
       max_live_tickers: 100
       universe_candidate_cap: 2000
       signal_confirm_bars: 2
       news_refresh_minutes: 15
+      target_return_pct: 0.004
+      max_drawdown_pct: 0.008
 
   conservative:
     broker:
       max_position_fraction: 0.3
     live:
-      long_threshold: 0.70
-      short_threshold: 0.78
+      long_threshold: 0.65
+      short_threshold: 0.65
       max_live_tickers: 100
       universe_candidate_cap: 2000
       signal_confirm_bars: 3
       news_refresh_minutes: 20
+      target_return_pct: 0.005
+      max_drawdown_pct: 0.006
 

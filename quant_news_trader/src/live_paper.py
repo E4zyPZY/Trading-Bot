@@ -215,6 +215,99 @@ def _apply_signal_confirmation(state_entry: dict, raw_signal: float, confirm_bar
     return float(state_entry.get("committed_signal", 0.0)), streak, False
 
 
+def _apply_trade_lifecycle_policy(
+    state_entry: dict,
+    broker: SimBroker,
+    price: float,
+    proposed_signal: float,
+    target_return_pct: float,
+    max_drawdown_pct: float,
+) -> tuple[float, str]:
+    """
+    Enforce hold-until-exit behavior:
+    - If in position, ignore new model flips until target or stop is hit.
+    - Long: exit at entry*(1+target) or entry*(1-max_drawdown).
+    - Short: exit at entry*(1-target) or entry*(1+max_drawdown).
+    Returns: (execution_signal, lifecycle_reason)
+    """
+    pos = int(getattr(broker, "position", 0) or 0)
+    px = float(price)
+    proposed = float(proposed_signal)
+
+    if pos == 0:
+        # Flat account: allow model to open a new position.
+        return proposed, "entry_allowed"
+
+    trade_plan = state_entry.get("trade_plan") or {}
+    entry_price = trade_plan.get("entry_price")
+    side = trade_plan.get("side")
+
+    if entry_price is None or side not in {"long", "short"}:
+        # Fallback when restarting without full metadata.
+        side = "long" if pos > 0 else "short"
+        entry_price = float(trade_plan.get("avg_entry_price", px) or px)
+        trade_plan = {
+            "side": side,
+            "entry_price": entry_price,
+            "target_price": entry_price * (1.0 + target_return_pct) if side == "long" else entry_price * (1.0 - target_return_pct),
+            "stop_price": entry_price * (1.0 - max_drawdown_pct) if side == "long" else entry_price * (1.0 + max_drawdown_pct),
+        }
+        state_entry["trade_plan"] = trade_plan
+
+    target_price = float(trade_plan["target_price"])
+    stop_price = float(trade_plan["stop_price"])
+
+    if side == "long":
+        if px >= target_price:
+            return 0.0, "target_exit_long"
+        if px <= stop_price:
+            return 0.0, "max_drawdown_exit_long"
+        return 1.0, "hold_long_until_exit"
+
+    # short side
+    if px <= target_price:
+        return 0.0, "target_exit_short"
+    if px >= stop_price:
+        return 0.0, "max_drawdown_exit_short"
+    return -1.0, "hold_short_until_exit"
+
+
+def _update_trade_plan_from_execution(
+    state_entry: dict,
+    broker: SimBroker,
+    last_event: dict | None,
+    price: float,
+    target_return_pct: float,
+    max_drawdown_pct: float,
+) -> None:
+    """Synchronize per-trade plan with executed broker state."""
+    pos = int(getattr(broker, "position", 0) or 0)
+    px = float(price)
+
+    if pos == 0:
+        state_entry["trade_plan"] = None
+        return
+
+    plan = state_entry.get("trade_plan")
+    if plan and plan.get("side") in {"long", "short"} and plan.get("entry_price") is not None:
+        return
+
+    entry_price = px
+    if last_event and last_event.get("trade_price") is not None:
+        try:
+            entry_price = float(last_event.get("trade_price"))
+        except Exception:
+            entry_price = px
+
+    side = "long" if pos > 0 else "short"
+    state_entry["trade_plan"] = {
+        "side": side,
+        "entry_price": entry_price,
+        "target_price": entry_price * (1.0 + target_return_pct) if side == "long" else entry_price * (1.0 - target_return_pct),
+        "stop_price": entry_price * (1.0 - max_drawdown_pct) if side == "long" else entry_price * (1.0 + max_drawdown_pct),
+    }
+
+
 def _refresh_news_if_due(
     cfg: dict,
     state_entry: dict,
@@ -429,6 +522,45 @@ def _append_transaction_rows(transaction_log_path: Path, rows: list[dict], logge
     logger.info("Appended %d transaction rows to %s", len(tx_rows), transaction_log_path)
 
 
+def _compute_portfolio_sentiment(state: dict) -> dict:
+    """Compute aggregate sentiment impact from all tickers in live state."""
+    sentiment_metrics = {}
+    
+    total_sentiment = 0.0
+    ticker_count = 0
+    
+    for ticker, st in state.items():
+        news_df = st.get("news_df", pd.DataFrame())
+        if news_df.empty or "sentiment" not in news_df.columns:
+            continue
+        
+        # Get daily sentiment aggregates
+        daily_sent = float(news_df["sentiment"].mean())
+        total_sentiment += daily_sent
+        ticker_count += 1
+        
+        sent_max = float(news_df["sentiment"].max())
+        sent_min = float(news_df["sentiment"].min())
+        sent_std = float(news_df["sentiment"].std()) if len(news_df) > 1 else 0.0
+        
+        sentiment_metrics[ticker] = {
+            "mean_sentiment": daily_sent,
+            "max_sentiment": sent_max,
+            "min_sentiment": sent_min,
+            "std_sentiment": sent_std,
+            "article_count": int(len(news_df)),
+        }
+    
+    # Portfolio-level aggregates
+    portfolio_metrics = {
+        "portfolio_avg_sentiment": total_sentiment / ticker_count if ticker_count > 0 else 0.0,
+        "active_ticker_count": ticker_count,
+        "by_ticker": sentiment_metrics,
+    }
+    
+    return portfolio_metrics
+
+
 def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone_name: str) -> dict:
     """Build a live portfolio snapshot with total and per-ticker state."""
     total_cash = 0.0
@@ -486,6 +618,7 @@ def _build_portfolio_snapshot(state: dict, timestamp_utc: pd.Timestamp, timezone
         "tickers": len(state),
         "news_sources": portfolio_news_sources,
         "positions": positions,
+        "sentiment_impact": _compute_portfolio_sentiment(state),
     }
 
 
@@ -763,6 +896,8 @@ def main(profile: str | None = None):
     short_thresh = float(live_cfg.get("short_threshold", 0.80))
     signal_confirm_bars = int(live_cfg.get("signal_confirm_bars", 2))
     signal_confirm_bars = max(1, signal_confirm_bars)
+    target_return_pct = float(live_cfg.get("target_return_pct", 0.004))
+    max_drawdown_pct = float(live_cfg.get("max_drawdown_pct", 0.008))
 
     # Log path (also used to resume state/history)
     logs_dir = root / "logs"
@@ -817,6 +952,7 @@ def main(profile: str | None = None):
                 "last_raw_signal": 0.0,
                 "signal_streak": 0,
                 "committed_signal": 0.0,
+                "trade_plan": None,
             }
         except Exception as e:
             logger.exception("Error setting up ticker %s: %s", ticker, e)
@@ -961,6 +1097,16 @@ def main(profile: str | None = None):
                 signal_confirm_bars,
             )
 
+            broker = st["broker"]
+            exec_signal, lifecycle_reason = _apply_trade_lifecycle_policy(
+                st,
+                broker,
+                price,
+                pre_signal,
+                target_return_pct,
+                max_drawdown_pct,
+            )
+
             logger.info(
                 "PRE-MARKET %s | %s price=%.2f prob_up=%.3f prob_down=%.3f recommended=%s raw=%+.1f exec=%+.1f streak=%d/%d confirmed=%s",
                 dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, "strftime") else str(dt),
@@ -970,11 +1116,12 @@ def main(profile: str | None = None):
                 prob_down,
                 rec,
                 raw_pre_signal,
-                pre_signal,
+                exec_signal,
                 streak,
                 signal_confirm_bars,
                 confirmed_now,
             )
+            logger.info("PRE-MARKET %s | %s lifecycle=%s", dt, ticker, lifecycle_reason)
             if h is not None:
                 logger.info(
                     "PRE-MARKET %s | %s hurst=%.3f thresholds long=%.3f short=%.3f",
@@ -985,11 +1132,18 @@ def main(profile: str | None = None):
                     local_short,
                 )
 
-            broker = st["broker"]
-            broker.step_to_target_fraction(dt, price, pre_signal)
+            broker.step_to_target_fraction(dt, price, exec_signal)
             equity = broker.equity(price)
 
             last_event = broker.trade_log[-1] if broker.trade_log else None
+            _update_trade_plan_from_execution(
+                st,
+                broker,
+                last_event,
+                price,
+                target_return_pct,
+                max_drawdown_pct,
+            )
 
             drawdown = 0.0
             if broker.max_equity > 0:
@@ -1004,7 +1158,7 @@ def main(profile: str | None = None):
                 "price_source": price_source,
                 "prob_up": prob_up,
                 "prob_down": prob_down,
-                "signal": pre_signal,
+                "signal": exec_signal,
                 "equity": equity,
                 "cash": last_event["cash"] if last_event else broker.cash,
                 "position": last_event["position"] if last_event else broker.position,
@@ -1162,6 +1316,16 @@ def main(profile: str | None = None):
                         signal_confirm_bars,
                     )
 
+                    broker = st["broker"]
+                    exec_signal, lifecycle_reason = _apply_trade_lifecycle_policy(
+                        st,
+                        broker,
+                        price,
+                        signal,
+                        target_return_pct,
+                        max_drawdown_pct,
+                    )
+
                     if h is not None:
                         logger.info(
                             "LIVE %s | hurst=%.3f thresholds long=%.3f short=%.3f prob_up=%.3f prob_down=%.3f raw=%+.1f exec=%+.1f streak=%d/%d confirmed=%s",
@@ -1172,17 +1336,25 @@ def main(profile: str | None = None):
                             prob_up,
                             prob_down,
                             raw_signal,
-                            signal,
+                            exec_signal,
                             streak,
                             signal_confirm_bars,
                             confirmed_now,
                         )
+                    logger.info("LIVE %s | lifecycle=%s", ticker, lifecycle_reason)
 
-                    broker = st["broker"]
-                    broker.step_to_target_fraction(dt, price, signal)
+                    broker.step_to_target_fraction(dt, price, exec_signal)
                     equity = broker.equity(price)
 
                     last_event = broker.trade_log[-1] if broker.trade_log else None
+                    _update_trade_plan_from_execution(
+                        st,
+                        broker,
+                        last_event,
+                        price,
+                        target_return_pct,
+                        max_drawdown_pct,
+                    )
 
                     drawdown = 0.0
                     if broker.max_equity > 0:
@@ -1198,7 +1370,7 @@ def main(profile: str | None = None):
                         "price_source": price_source,
                         "prob_up": prob_up,
                         "prob_down": prob_down,
-                        "signal": signal,
+                        "signal": exec_signal,
                         "equity": equity,
                         "cash": last_event["cash"] if last_event else broker.cash,
                         "position": last_event["position"] if last_event else broker.position,
