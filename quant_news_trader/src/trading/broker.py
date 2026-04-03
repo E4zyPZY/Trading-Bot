@@ -21,6 +21,7 @@ class SimBroker:
         self,
         initial_cash: float = 100000.0,
         commission_per_trade: float = 0.0,
+        commission_rate: float = 0.0,
         slippage_bp: float = 0.0,
         max_loss_fraction: float = 1.0,
         max_position_fraction: float = 0.2,  # NEW
@@ -29,7 +30,8 @@ class SimBroker:
         self.cash = float(initial_cash)
         self.position = 0
 
-        self.commission_per_trade = float(commission_per_trade)
+        self.commission_per_trade = float(commission_per_trade)  # minimum fee per trade
+        self.commission_rate = float(commission_rate)  # fraction of trade value (e.g. 0.00003)
         self.slippage_bp = float(slippage_bp)
         self.max_loss_fraction = float(max_loss_fraction)
         self.max_position_fraction = float(max_position_fraction)
@@ -43,6 +45,14 @@ class SimBroker:
     def equity(self, price: float) -> float:
         """Current account equity at given price."""
         return self.cash + self.position * float(price)
+
+    def _calc_commission(self, gross_trade_value: float) -> float:
+        """
+        Commission = max(commission_per_trade, commission_rate * abs(trade_value)).
+        If both are zero, commission is zero.
+        """
+        rate_fee = self.commission_rate * abs(gross_trade_value)
+        return max(self.commission_per_trade, rate_fee)
 
     def _equity_floor(self) -> float:
         """
@@ -128,7 +138,7 @@ class SimBroker:
 
         # Gross trade value (positive for buys, negative for sells)
         gross_trade_value = shares_to_trade * trade_price
-        commission = self.commission_per_trade if shares_to_trade != 0 else 0.0
+        commission = self._calc_commission(gross_trade_value) if shares_to_trade != 0 else 0.0
 
         # Enforce "no leverage" when BUYING
         if shares_to_trade > 0:
@@ -143,7 +153,7 @@ class SimBroker:
                     return
                 shares_to_trade = max_affordable_shares
                 gross_trade_value = shares_to_trade * trade_price
-                commission = self.commission_per_trade if shares_to_trade != 0 else 0.0
+                commission = self._calc_commission(gross_trade_value) if shares_to_trade != 0 else 0.0
 
         # Simulate post-trade state for risk check
         post_pos = pre_pos + shares_to_trade
@@ -197,7 +207,7 @@ class SimBroker:
 
             shares_to_trade = -self.position
             gross_trade_value = shares_to_trade * trade_price
-            commission = self.commission_per_trade if shares_to_trade != 0 else 0.0
+            commission = self._calc_commission(gross_trade_value) if shares_to_trade != 0 else 0.0
 
             self.cash = self.cash - gross_trade_value - commission
             self.position = 0

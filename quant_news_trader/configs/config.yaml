@@ -21,7 +21,8 @@ news:
 
 broker:
   initial_cash: 1000000.0
-  commission_per_trade: 10.0
+  commission_per_trade: 0.02   # minimum fee per trade ($0.02)
+  commission_rate: 0.00003     # 0.003% of trade value; actual = max(min_fee, rate*value)
   slippage_bp: 5
   max_loss_fraction: 1.0
   max_position_fraction: 0.5
@@ -40,7 +41,7 @@ model:
   test_size: 0.2
   random_state: 42
   pca_components: 8
-  long_threshold: 0.60
+  long_threshold: 0.70
   short_threshold: 0.60
 
 risk:
@@ -115,9 +116,10 @@ live:
   interval_seconds: 60
   display_timezone: "Asia/Shanghai"
   use_moomoo: true
-  max_live_tickers: 30
+  max_live_tickers: 100
+  universe_candidate_cap: 2000
   news_refresh_minutes: 15
-  long_threshold: 0.60
+  long_threshold: 0.70
   short_threshold: 0.60
   hard_stale_bar_block: true
   resume_state: true
@@ -139,7 +141,8 @@ moomoo:
 # Extended broker config
 broker:
   initial_cash: 1000000.0
-  commission_per_trade: 10.0
+  commission_per_trade: 0.02   # minimum fee per trade ($0.02)
+  commission_rate: 0.00003     # 0.003% of trade value; actual = max(min_fee, rate*value)
   slippage_bp: 5
   max_loss_fraction: 1.0
   max_position_fraction: 0.5
@@ -150,26 +153,29 @@ dynamic_profiles:
     broker:
       max_position_fraction: 0.9
     live:
-      long_threshold: 0.56
+      long_threshold: 0.70
       short_threshold: 0.68
-      max_live_tickers: 30
+      max_live_tickers: 100
+      universe_candidate_cap: 2000
       news_refresh_minutes: 10
 
   balanced:
     broker:
       max_position_fraction: 0.5
     live:
-      long_threshold: 0.60
+      long_threshold: 0.70
       short_threshold: 0.72
-      max_live_tickers: 30
+      max_live_tickers: 100
+      universe_candidate_cap: 2000
       news_refresh_minutes: 15
 
   conservative:
     broker:
       max_position_fraction: 0.3
     live:
-      long_threshold: 0.65
+      long_threshold: 0.70
       short_threshold: 0.78
-      max_live_tickers: 30
+      max_live_tickers: 100
+      universe_candidate_cap: 2000
       news_refresh_minutes: 20
 

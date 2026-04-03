@@ -72,6 +72,7 @@ def backtest_single_ticker(ticker: str, cfg: dict, logger):
     broker = SimBroker(
         initial_cash=bcfg["initial_cash"],
         commission_per_trade=bcfg["commission_per_trade"],
+        commission_rate=bcfg.get("commission_rate", 0.0),
         slippage_bp=bcfg["slippage_bp"],
     )
 

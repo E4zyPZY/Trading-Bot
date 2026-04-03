@@ -128,6 +128,28 @@ def _merge_tickers(primary: list[str], secondary: list[str], cap: int) -> list[s
     return out
 
 
+def _rank_approved_universe(df: pd.DataFrame) -> list[str]:
+    """
+    Rank approved symbols by available performance columns, then return unique tickers.
+    Preferred sort columns: sharpe, total_return, cagr, trades (descending).
+    """
+    if df is None or df.empty or "ticker" not in df.columns:
+        return []
+
+    work = df.copy()
+    work["ticker"] = work["ticker"].astype(str).str.strip().str.upper()
+    work = work[work["ticker"] != ""]
+
+    sort_cols = [c for c in ["sharpe", "total_return", "cagr", "trades"] if c in work.columns]
+    for col in sort_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+
+    if sort_cols:
+        work = work.sort_values(by=sort_cols, ascending=[False] * len(sort_cols), kind="mergesort")
+
+    return work["ticker"].drop_duplicates(keep="first").tolist()
+
+
 def _adaptive_thresholds_from_hurst(
     prices: pd.Series,
     base_long: float,
@@ -647,21 +669,34 @@ def main(profile: str | None = None):
     approved_path = root / "data" / "approved_universe.csv"
     tickers = []
     max_live_tickers = int(live_cfg.get("max_live_tickers", 30))
+    universe_candidate_cap = int(live_cfg.get("universe_candidate_cap", 2000))
+    universe_candidate_cap = max(universe_candidate_cap, max_live_tickers)
+    approved_ranked = []
 
     if approved_path.exists():
         try:
             approved_df = pd.read_csv(approved_path)
             if not approved_df.empty and "ticker" in approved_df.columns:
-                tickers = approved_df["ticker"].dropna().astype(str).tolist()
-                logger.info("Loaded approved universe (%d symbols)", len(tickers))
+                approved_ranked = _rank_approved_universe(approved_df)
+                logger.info("Loaded approved universe (%d symbols)", len(approved_ranked))
             else:
                 logger.info("approved_universe.csv is empty or missing 'ticker' column.")
         except Exception as e:
             logger.exception("Failed to read approved_universe.csv: %s", e)
 
-    # Supplement with broader YAML universe and cap total names.
+    # Supplement with broader YAML universe to create a large candidate pool,
+    # then trade only the top max_live_tickers names.
     yaml_universe = _load_universe_yaml(root)
-    tickers = _merge_tickers(tickers, yaml_universe, max_live_tickers)
+    candidate_tickers = _merge_tickers(approved_ranked, yaml_universe, universe_candidate_cap)
+
+    if len(candidate_tickers) < universe_candidate_cap:
+        logger.warning(
+            "Candidate universe smaller than requested cap (%d < %d).",
+            len(candidate_tickers),
+            universe_candidate_cap,
+        )
+
+    tickers = candidate_tickers[:max_live_tickers]
 
     if not tickers:
         # Fallback to single ticker from config
@@ -671,7 +706,12 @@ def main(profile: str | None = None):
         logger.info("No approved universe; falling back to config ticker: %s", fallback_ticker)
 
     num_tickers = len(tickers)
-    logger.info("Live NN paper-trading universe size=%d (cap=%d)", num_tickers, max_live_tickers)
+    logger.info(
+        "Live candidate universe size=%d (cap=%d), trading top %d symbols",
+        len(candidate_tickers) if 'candidate_tickers' in locals() else num_tickers,
+        universe_candidate_cap,
+        num_tickers,
+    )
 
     # === 2) Split total capital across tickers (equal slices) ===
     bcfg = cfg["broker"]
@@ -722,6 +762,7 @@ def main(profile: str | None = None):
             broker = SimBroker(
                 initial_cash=per_ticker_cash,
                 commission_per_trade=bcfg["commission_per_trade"],
+                commission_rate=bcfg.get("commission_rate", 0.0),
                 slippage_bp=bcfg["slippage_bp"],
                 max_loss_fraction=bcfg.get("max_loss_fraction", 1.0),
                 max_position_fraction=bcfg.get("max_position_fraction", 0.2),
