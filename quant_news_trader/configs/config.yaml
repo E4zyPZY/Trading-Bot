@@ -118,6 +118,7 @@ live:
   use_moomoo: true
   max_live_tickers: 100
   universe_candidate_cap: 2000
+  signal_confirm_bars: 2
   news_refresh_minutes: 15
   long_threshold: 0.70
   short_threshold: 0.60
@@ -157,6 +158,7 @@ dynamic_profiles:
       short_threshold: 0.68
       max_live_tickers: 100
       universe_candidate_cap: 2000
+      signal_confirm_bars: 2
       news_refresh_minutes: 10
 
   balanced:
@@ -167,6 +169,7 @@ dynamic_profiles:
       short_threshold: 0.72
       max_live_tickers: 100
       universe_candidate_cap: 2000
+      signal_confirm_bars: 2
       news_refresh_minutes: 15
 
   conservative:
@@ -177,5 +180,6 @@ dynamic_profiles:
       short_threshold: 0.78
       max_live_tickers: 100
       universe_candidate_cap: 2000
+      signal_confirm_bars: 3
       news_refresh_minutes: 20
 

@@ -181,6 +181,40 @@ def _adaptive_thresholds_from_hurst(
         return base_long, base_short, None
 
 
+def _apply_signal_confirmation(state_entry: dict, raw_signal: float, confirm_bars: int) -> tuple[float, int, bool]:
+    """
+    Require N consecutive identical long/short raw signals before committing.
+    - raw_signal in {-1, 0, +1}
+    - 0 (flat) is applied immediately for risk-off behavior.
+    Returns: (execution_signal, streak_count, confirmed_now)
+    """
+    n = max(1, int(confirm_bars))
+    raw = float(raw_signal)
+
+    if raw == 0.0:
+        state_entry["last_raw_signal"] = 0.0
+        state_entry["signal_streak"] = 0
+        state_entry["committed_signal"] = 0.0
+        return 0.0, 0, True
+
+    prev_raw = float(state_entry.get("last_raw_signal", 0.0))
+    streak = int(state_entry.get("signal_streak", 0))
+
+    if raw == prev_raw:
+        streak += 1
+    else:
+        streak = 1
+
+    state_entry["last_raw_signal"] = raw
+    state_entry["signal_streak"] = streak
+
+    if streak >= n:
+        state_entry["committed_signal"] = raw
+        return raw, streak, True
+
+    return float(state_entry.get("committed_signal", 0.0)), streak, False
+
+
 def _refresh_news_if_due(
     cfg: dict,
     state_entry: dict,
@@ -727,6 +761,8 @@ def main(profile: str | None = None):
     # thresholds for signals
     long_thresh = float(live_cfg.get("long_threshold", 0.60))
     short_thresh = float(live_cfg.get("short_threshold", 0.80))
+    signal_confirm_bars = int(live_cfg.get("signal_confirm_bars", 2))
+    signal_confirm_bars = max(1, signal_confirm_bars)
 
     # Log path (also used to resume state/history)
     logs_dir = root / "logs"
@@ -778,6 +814,9 @@ def main(profile: str | None = None):
                 "last_news_refresh": pd.Timestamp.now("UTC"),
                 "broker": broker,
                 "last_price": None,
+                "last_raw_signal": 0.0,
+                "signal_streak": 0,
+                "committed_signal": 0.0,
             }
         except Exception as e:
             logger.exception("Error setting up ticker %s: %s", ticker, e)
@@ -907,24 +946,34 @@ def main(profile: str | None = None):
             )
 
             if prob_up >= local_long:
-                pre_signal = 1.0
+                raw_pre_signal = 1.0
                 rec = "LONG"
             elif prob_down >= local_short:
-                pre_signal = -1.0
+                raw_pre_signal = -1.0
                 rec = "SHORT"
             else:
-                pre_signal = 0.0
+                raw_pre_signal = 0.0
                 rec = "FLAT"
 
+            pre_signal, streak, confirmed_now = _apply_signal_confirmation(
+                st,
+                raw_pre_signal,
+                signal_confirm_bars,
+            )
+
             logger.info(
-                "PRE-MARKET %s | %s price=%.2f prob_up=%.3f prob_down=%.3f recommended=%s (signal=%+.1f)",
+                "PRE-MARKET %s | %s price=%.2f prob_up=%.3f prob_down=%.3f recommended=%s raw=%+.1f exec=%+.1f streak=%d/%d confirmed=%s",
                 dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, "strftime") else str(dt),
                 ticker,
                 price,
                 prob_up,
                 prob_down,
                 rec,
+                raw_pre_signal,
                 pre_signal,
+                streak,
+                signal_confirm_bars,
+                confirmed_now,
             )
             if h is not None:
                 logger.info(
@@ -1101,22 +1150,32 @@ def main(profile: str | None = None):
                     )
 
                     if prob_up >= local_long:
-                        signal = 1.0
+                        raw_signal = 1.0
                     elif prob_down >= local_short:
-                        signal = -1.0
+                        raw_signal = -1.0
                     else:
-                        signal = 0.0
+                        raw_signal = 0.0
+
+                    signal, streak, confirmed_now = _apply_signal_confirmation(
+                        st,
+                        raw_signal,
+                        signal_confirm_bars,
+                    )
 
                     if h is not None:
                         logger.info(
-                            "LIVE %s | hurst=%.3f thresholds long=%.3f short=%.3f prob_up=%.3f prob_down=%.3f signal=%+.1f",
+                            "LIVE %s | hurst=%.3f thresholds long=%.3f short=%.3f prob_up=%.3f prob_down=%.3f raw=%+.1f exec=%+.1f streak=%d/%d confirmed=%s",
                             ticker,
                             h,
                             local_long,
                             local_short,
                             prob_up,
                             prob_down,
+                            raw_signal,
                             signal,
+                            streak,
+                            signal_confirm_bars,
+                            confirmed_now,
                         )
 
                     broker = st["broker"]
